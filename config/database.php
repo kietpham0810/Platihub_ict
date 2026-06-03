@@ -8,25 +8,27 @@ class Database {
     public $conn;
 
     public function __construct() {
-        // Ưu tiên lấy từ biến môi trường (Render), nếu không có mới fallback về localhost
-        $this->host = getenv('DB_HOST') ?: "localhost";
-        $this->db_name = getenv('DB_NAME') ?: "platihub_db";
-        $this->username = getenv('DB_USER') ?: "root";
-        $this->password = getenv('DB_PASS') ?: "";
+        // Bọc lót 3 tầng để đảm bảo Docker/Apache bắt được biến môi trường trên mây
+        $this->host = $_SERVER['DB_HOST'] ?? $_ENV['DB_HOST'] ?? getenv('DB_HOST') ?: "localhost";
+        $this->db_name = $_SERVER['DB_NAME'] ?? $_ENV['DB_NAME'] ?? getenv('DB_NAME') ?: "platihub_db";
+        $this->username = $_SERVER['DB_USER'] ?? $_ENV['DB_USER'] ?? getenv('DB_USER') ?: "root";
+        $this->password = $_SERVER['DB_PASS'] ?? $_ENV['DB_PASS'] ?? getenv('DB_PASS') ?: "";
     }
 
     public function getConnection() {
         $this->conn = null;
         try {
-            $this->conn = new PDO("mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4", $this->username, $this->password);
-            // Bật chế độ báo lỗi nghiêm ngặt để dễ debug trên server
+            // Nếu phát hiện đang ở localhost thì gọi mặc định, còn có DB_HOST thật thì ép kết nối qua TCP/IP
+            $dsn = "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4";
+            
+            $this->conn = new PDO($dsn, $this->username, $this->password);
             $this->conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
         } catch(PDOException $exception) {
-            // Trả về JSON lỗi thay vì in text thuần để Frontend không bị crash
             http_response_code(500);
             echo json_encode([
                 "status" => "error", 
                 "message" => "Lỗi kết nối Cơ sở dữ liệu Cloud.",
+                "host_debug" => $this->host, // In luôn cái Host ra xem nó đang bắt được gì để dễ debug
                 "error_detail" => $exception->getMessage()
             ]);
             exit();
