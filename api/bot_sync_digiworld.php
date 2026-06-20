@@ -5,11 +5,10 @@ header("Content-Type: application/json; charset=UTF-8");
 
 // Bỏ giới hạn thời gian thực thi của PHP để bot có đủ thời gian cào hàng chục trang
 set_time_limit(0); 
-ini_set('memory_limit', '512M'); // Chống tràn RAM khi mảng HTML DOM quá lớn
+ini_set('memory_limit', '512M'); 
 
 require_once '../config/database.php';
 
-// Tách URL thành chuỗi gốc để dễ dàng nối đuôi phân trang
 $base_slug = "https://ict.digiworld.com.vn/san-pham/may-tinh-xach-tay-150";
 
 function fetchHTML($url) {
@@ -45,7 +44,6 @@ try {
     $page = 1;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
-    // CHUẨN BỊ LỆNH SQL TỐI ƯU
     $check_query = "SELECT id FROM products WHERE product_name = :name LIMIT 1";
     $stmt_check = $db->prepare($check_query);
 
@@ -54,9 +52,7 @@ try {
                      VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', :status, 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    // --- VÒNG LẶP VÔ HẠN: QUÉT ĐẾN KHI HẾT DỮ LIỆU THÌ THÔI ---
     while (true) {
-        // [CẬP NHẬT TRỌNG TÂM]: THUẬT TOÁN BUILD URL PHÂN TRANG
         $current_url = ($page === 1) ? $base_slug . ".html" : $base_slug . "-page" . $page . ".html";
         $html = fetchHTML($current_url);
         
@@ -66,7 +62,6 @@ try {
 
         $nameNodes = $xpath->query("//h2[@class='name']");
         
-        // CHỐT CHẶN: Hết dữ liệu thì ngắt vòng lặp
         if ($nameNodes->length === 0) {
             break; 
         }
@@ -75,7 +70,6 @@ try {
             $product_name = trim($nameNode->nodeValue);
             if (empty($product_name)) continue;
 
-            // KIỂM TRA TRÙNG LẶP
             $stmt_check->bindParam(":name", $product_name);
             $stmt_check->execute();
             if ($stmt_check->rowCount() > 0) {
@@ -83,7 +77,6 @@ try {
                 continue; 
             }
 
-            // BÓC TÁCH ẢNH
             $imgNodes = $xpath->query("ancestor::*[.//img][1]//img", $nameNode);
             $image_url = "";
             if ($imgNodes->length > 0) {
@@ -109,13 +102,12 @@ try {
             }
             if (empty($image_url)) $image_url = $default_image;
 
-            // ==========================================
-            // THUẬT TOÁN KIỂM DUYỆT CHẤT LƯỢNG ẢNH (V2 - Strict Mode)
-            // ==========================================
             $status = 'pending'; 
             $img_lower = strtolower($image_url);
             
-            // Chặn: Ảnh rác, URL cụt, URL mặc định của hệ thống
+            // ==========================================
+            // LỌC ẢNH KHẮT KHE: LỖI LÀ VỨT!
+            // ==========================================
             if (
                 $image_url === $default_image || 
                 $image_url === 'https://ict.digiworld.com.vn/' || 
@@ -124,11 +116,11 @@ try {
                 strpos($img_lower, 'placeholder') !== false || 
                 strpos($img_lower, 'default') !== false
             ) {
-                $status = 'hidden'; 
                 $hiddenCount++;
+                // BỎ QUA SẢN PHẨM NÀY, KHÔNG LƯU VÀO DATABASE!
+                continue; 
             }
 
-            // BÓC TÁCH THÔNG SỐ (SPECIFICATIONS)
             $specs = [];
             $specNodes = $xpath->query("ancestor::*[.//div[contains(@class, 'bginfo')]][1]//div[contains(@class, 'bginfo')]//li", $nameNode);
             if ($specNodes !== false) {
@@ -144,7 +136,6 @@ try {
             }
             $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
-            // ĐẨY VÀO DATABASE
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":image", $image_url);
             $stmt_insert->bindParam(":specs", $specs_json);
@@ -156,15 +147,14 @@ try {
         }
         
         $page++;
-        sleep(1); // Anti-ban Delay
+        sleep(1); 
         
-        if ($page > 50) { // Giới hạn quét tối đa 50 trang để bảo vệ hệ thống
+        if ($page > 50) { 
             break;
         }
     }
 
-    // GHI LOG HỆ THỐNG
-    $log_message = "[" . date('Y-m-d H:i:s') . "] BOT SYNC: Scanned $page pages. Inserted: $insertedCount (Hidden bad images: $hiddenCount). Skipped Duplicates: $skippedCount\n";
+    $log_message = "[" . date('Y-m-d H:i:s') . "] BOT SYNC: Scanned $page pages. Inserted: $insertedCount (Skipped bad images: $hiddenCount). Skipped Duplicates: $skippedCount\n";
     file_put_contents(__DIR__ . '/sync_digiworld_log.txt', $log_message, FILE_APPEND);
 
     echo json_encode([
@@ -173,7 +163,7 @@ try {
         "data" => [
             "pages_scanned" => $page - 1,
             "new_inserted" => $insertedCount,
-            "hidden_bad_images" => $hiddenCount,
+            "skipped_bad_images" => $hiddenCount,
             "skipped_duplicates" => $skippedCount
         ]
     ]);
