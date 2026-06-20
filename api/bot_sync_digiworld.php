@@ -39,6 +39,7 @@ try {
     
     $insertedCount = 0;
     $skippedCount = 0;
+    $hiddenCount = 0; // Đếm số sản phẩm bị ẩn do lỗi ảnh
     $page = 1;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
@@ -46,9 +47,10 @@ try {
     $check_query = "SELECT id FROM products WHERE product_name = :name LIMIT 1";
     $stmt_check = $db->prepare($check_query);
 
+    // Đã thay đổi 'pending' thành :status để truyền biến động
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
-                     VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
+                     VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', :status, 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
     // --- VÒNG LẶP VÔ HẠN: QUÉT ĐẾN KHI HẾT DỮ LIỆU THÌ THÔI ---
@@ -105,6 +107,22 @@ try {
             }
             if (empty($image_url)) $image_url = $default_image;
 
+            // ==========================================
+            // THUẬT TOÁN KIỂM DUYỆT CHẤT LƯỢNG ẢNH
+            // ==========================================
+            $status = 'pending'; // Mặc định là cho vào kho chờ Admin báo giá
+            $img_lower = strtolower($image_url);
+            
+            // Nếu ảnh là placeholder hoặc chứa các từ khóa ảnh lỗi -> Auto Ẩn
+            if ($image_url === $default_image || 
+                strpos($img_lower, 'no-image') !== false || 
+                strpos($img_lower, 'placeholder') !== false || 
+                strpos($img_lower, 'default') !== false) {
+                
+                $status = 'hidden'; // Chặn duyệt
+                $hiddenCount++;
+            }
+
             // Logic lấy thông số kỹ thuật
             $specs = [];
             $specNodes = $xpath->query("ancestor::*[.//div[contains(@class, 'bginfo')]][1]//div[contains(@class, 'bginfo')]//li", $nameNode);
@@ -125,35 +143,39 @@ try {
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":image", $image_url);
             $stmt_insert->bindParam(":specs", $specs_json);
+            $stmt_insert->bindParam(":status", $status); // Bind status động
             
             if($stmt_insert->execute()) {
                 $insertedCount++;
             }
         }
         
-        // Tăng số trang lên cho vòng lặp tiếp theo
         $page++;
-        
-        // Ngủ 1 giây để giả lập người dùng cuộn trang
         sleep(1); 
         
-        // Chốt chặn an toàn dự phòng: Chống chạy vô hạn nếu web bị lỗi cấu trúc (max 100 trang)
         if ($page > 100) {
             break;
         }
     }
 
+    // GHI LOG HỆ THỐNG ĐỂ KIỂM TRA VÀO SÁNG HÔM SAU
+    $log_message = "[" . date('Y-m-d H:i:s') . "] BOT SYNC: Scanned $page pages. Inserted: $insertedCount (Hidden bad images: $hiddenCount). Skipped Duplicates: $skippedCount\n";
+    file_put_contents(__DIR__ . '/sync_digiworld_log.txt', $log_message, FILE_APPEND);
+
     echo json_encode([
         "status" => "success",
-        "message" => "Quá trình Auto Crawl đã kết thúc toàn bộ danh mục.",
+        "message" => "Quá trình Auto Crawl đã kết thúc.",
         "data" => [
             "pages_scanned" => $page - 1,
             "new_inserted" => $insertedCount,
+            "hidden_bad_images" => $hiddenCount,
             "skipped_duplicates" => $skippedCount
         ]
     ]);
 
 } catch (Exception $e) {
+    // Ghi log lỗi
+    file_put_contents(__DIR__ . '/sync_digiworld_log.txt', "[" . date('Y-m-d H:i:s') . "] ERROR: " . $e->getMessage() . "\n", FILE_APPEND);
     http_response_code(500);
     echo json_encode([
         "status" => "error",
