@@ -1,9 +1,18 @@
 <?php
+// BƯỚC 1: MỞ CỬA CORS CHO CẢ POST VÀ OPTIONS
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
-header("Access-Control-Allow-Methods: POST");
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE");
 header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
 
+// BƯỚC 2: CHẶN ĐỨNG PREFLIGHT
+// Trình duyệt hỏi đường? Trả lời 200 OK và ngắt script ngay lập tức, không chạy logic bên dưới!
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
+
+// BƯỚC 3: LOGIC CẬP NHẬT TRẠNG THÁI
 require_once '../config/database.php';
 
 $database = new Database();
