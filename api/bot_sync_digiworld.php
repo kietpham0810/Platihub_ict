@@ -55,7 +55,7 @@ try {
     $skippedCount = 0;
     $hiddenCount = 0; 
     $page = $start_page;
-    $pages_to_crawl = 2; // Rút ngắn lại để hạ tầng dễ thở
+    $pages_to_crawl = 2; 
     $max_page = $start_page + $pages_to_crawl;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
@@ -100,18 +100,15 @@ try {
             if ($existing_product) {
                 $specs_str = $existing_product['specifications'];
                 if (!empty($specs_str) && $specs_str !== 'null' && $specs_str !== '[]') {
-                    // GIẢI MÃ JSON ĐỂ KIỂM TRA CHÍNH XÁC (Tránh lỗi Unicode Encoding)
                     $decoded = json_decode($specs_str, true);
                     $is_basic = false;
                     if (is_array($decoded)) {
                         foreach (array_keys($decoded) as $k) {
-                            if (strpos($k, 'Cấu hình') !== false) {
+                            if (strpos($k, 'Cấu hình') !== false || strpos($k, 'Đặc điểm') !== false) {
                                 $is_basic = true; break;
                             }
                         }
                     }
-                    
-                    // Nếu đã có thông số xịn (không phải cấu hình cơ bản) -> Bỏ qua
                     if (!$is_basic) {
                         $skippedCount++;
                         continue; 
@@ -146,9 +143,6 @@ try {
                 continue; 
             }
 
-            // ==========================================
-            // 🚀 ĐỘNG CƠ V6: CHỐNG CHẶN IP & ÉP KIỂU RAW TEXT
-            // ==========================================
             $specs = [];
             $detail_url = "";
 
@@ -169,7 +163,6 @@ try {
                     $detail_url = "https://ict.digiworld.com.vn/" . ltrim($detail_url, '/');
                 }
 
-                // 🛑 BẢO MẬT: NGHỈ 0.5 GIÂY ĐỂ TRÁNH BỊ TƯỜNG LỬA DIGIWORLD CHẶN KẾT NỐI
                 usleep(500000); 
 
                 $detail_html = fetchHTML($detail_url);
@@ -178,7 +171,7 @@ try {
                     @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
                     $detail_xpath = new DOMXPath($detail_dom);
 
-                    // --- TẦNG 1: QUÉT BẢNG <table> CHUẨN ---
+                    // Tầng 1: Lấy Bảng
                     $rows = $detail_xpath->query("//table//tr");
                     foreach ($rows as $row) {
                         $th = $detail_xpath->query(".//th", $row);
@@ -200,7 +193,7 @@ try {
                         }
                     }
 
-                    // --- TẦNG 2: ÉP KIỂU VĂN BẢN THÔ TOÀN BỘ TRANG CHI TIẾT ---
+                    // Tầng 2: Ép kiểu Văn bản thô
                     if (empty($specs)) {
                         $clean_html = preg_replace('/<script\b[^>]*>(.*?)<\/script>/is', "", $detail_html);
                         $clean_html = preg_replace('/<style\b[^>]*>(.*?)<\/style>/is', "", $clean_html);
@@ -217,7 +210,6 @@ try {
                                 $key = trim($parts[0]);
                                 $val = trim($parts[1]);
                                 
-                                // Ràng buộc: Key chỉ từ 2 đến 45 ký tự, không chứa thẻ HTML
                                 if (strlen($key) >= 2 && strlen($key) <= 45 && strlen($val) > 0) {
                                     if (!preg_match('/[{}<>]/', $key)) {
                                         $lower_key = mb_strtolower($key);
@@ -236,12 +228,12 @@ try {
                 }
             }
             
-            // --- TẦNG 3: FALLBACK TRANG CHỦ KHI LINK DETAIL CHẾT ---
+            // TẦNG 3: GIẢI MÃ MẬT MÃ KHO (SKU HEURISTIC PARSER)
             if (empty($specs)) {
                 $container = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]", $nameNode);
                 if ($container->length > 0) {
                     $all_text = $container->item(0)->nodeValue;
-                    if (strpos($all_text, '/') !== false && (strpos($all_text, 'RAM') !== false || strpos($all_text, 'SSD') !== false || strpos($all_text, 'Intel') !== false || strpos($all_text, 'AMD') !== false)) {
+                    if (strpos($all_text, '/') !== false) {
                         $divs = $xpath->query(".//div | .//p", $container->item(0));
                         foreach($divs as $d) {
                             $t = trim($d->nodeValue);
@@ -249,7 +241,34 @@ try {
                                 $parts = explode('/', $t);
                                 foreach($parts as $idx => $p) {
                                     $p = trim($p);
-                                    if(!empty($p)) $specs["Cấu hình cơ bản ".($idx+1)] = $p;
+                                    if(empty($p)) continue;
+                                    
+                                    $p_upper = strtoupper($p);
+                                    $key_name = "Đặc điểm " . ($idx + 1);
+
+                                    // Nhận diện AI siêu tốc
+                                    if (preg_match('/(GTX|RTX|RADEON|GEFORCE|IRIS|UHD|VGA|MX\d{3}|GD5)/', $p_upper)) {
+                                        $key_name = "Card đồ họa (VGA)";
+                                    } elseif (preg_match('/(I3|I5|I7|I9|RYZEN|CORE|PENTIUM|CELERON)/', $p_upper)) {
+                                        $key_name = "Vi xử lý (CPU)";
+                                    } elseif (preg_match('/(SSD|HDD|NVME|EMMC)/', $p_upper)) {
+                                        $key_name = "Ổ cứng lưu trữ";
+                                    } elseif (preg_match('/(FHD|HD|INCH|\"|OLED|IPS|HZ)/', $p_upper) || preg_match('/^\d{2}(\.\d)?(FHD|HD)/', $p_upper)) {
+                                        $key_name = "Màn hình";
+                                    } elseif (preg_match('/(GD4|DDR|RAM|GB)/', $p_upper) && !preg_match('/(SSD|HDD|GTX|RTX)/', $p_upper)) {
+                                        $key_name = "Bộ nhớ RAM";
+                                    } elseif (preg_match('/(W10|W11|WIN|UBUNTU|DOS|MAC)/', $p_upper)) {
+                                        $key_name = "Hệ điều hành";
+                                    } elseif (preg_match('/(WHR|CELL|PIN)/', $p_upper)) {
+                                        $key_name = "Pin & Nguồn";
+                                    }
+
+                                    // Ngăn chặn trùng lặp Key trong JSON
+                                    if (isset($specs[$key_name])) {
+                                        $specs[$key_name . " (" . $idx . ")"] = $p;
+                                    } else {
+                                        $specs[$key_name] = $p;
+                                    }
                                 }
                                 break;
                             }
