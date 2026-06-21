@@ -98,16 +98,16 @@ try {
             $is_duplicate_but_need_specs = false;
 
             if ($existing_product) {
-                // Kiểm tra gắt gao: Nếu đã có thông số (khác rỗng, khác null, khác chuỗi json rỗng) thì mới bỏ qua
                 if (!empty($existing_product['specifications']) && $existing_product['specifications'] !== 'null' && $existing_product['specifications'] !== '[]') {
-                    $skippedCount++;
-                    continue; 
+                    // Nếu thông số đang là mảng thô (Cấu hình cơ bản 1) thì cho phép ghi đè
+                    if (strpos($existing_product['specifications'], 'Cấu hình cơ bản 1') === false) {
+                        $skippedCount++;
+                        continue; 
+                    }
                 }
-                // Tên đã có nhưng thông số trống -> Mở cổng cào bổ sung
                 $is_duplicate_but_need_specs = true;
             }
 
-            // Trích xuất URL ảnh
             $imgNodes = $xpath->query("ancestor::*[.//img][1]//img", $nameNode);
             $image_url = "";
             if ($imgNodes->length > 0) {
@@ -135,12 +135,11 @@ try {
             }
 
             // ==========================================
-            // 🚀 ĐỘNG CƠ BÓC TÁCH THÔNG SỐ V4 (BẤT BẠI)
+            // 🚀 ĐỘNG CƠ BÓC TÁCH THÔNG SỐ V5 (TỐI THƯỢNG)
             // ==========================================
             $specs = [];
             $detail_url = "";
 
-            // BƯỚC 1: Săn Link (Quét toàn bộ thẻ cha chứa sản phẩm để tìm thẻ a có đuôi html)
             $aTags = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]//a", $nameNode);
             if ($aTags !== false) {
                 foreach($aTags as $a) {
@@ -152,7 +151,6 @@ try {
                 }
             }
 
-            // BƯỚC 2: Chui vào trang chi tiết và nhổ bật gốc cái bảng
             if (!empty($detail_url)) {
                 $detail_url = trim($detail_url);
                 if (strpos($detail_url, 'http') === false) {
@@ -165,13 +163,13 @@ try {
                     @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
                     $detail_xpath = new DOMXPath($detail_dom);
 
+                    // --- TẦNG 1: QUÉT BẢNG <table> CHUẨN ---
                     $rows = $detail_xpath->query("//table//tr");
                     foreach ($rows as $row) {
                         $th = $detail_xpath->query(".//th", $row);
                         $td = $detail_xpath->query(".//td", $row);
                         
                         $key = ""; $val = "";
-                        // Hỗ trợ cả 2 định dạng bảng: th-td và td-td
                         if ($th->length > 0 && $td->length > 0) {
                             $key = trim(strip_tags($th->item(0)->nodeValue));
                             $val = trim(strip_tags($td->item(0)->nodeValue));
@@ -187,20 +185,52 @@ try {
                             $specs[$key] = $val;
                         }
                     }
+
+                    // --- TẦNG 2: BẮT MẠCH KHỐI RAW TEXT CÓ DẤU HAI CHẤM ":" ---
+                    // Dành cho trường hợp Digiworld vứt nguyên đống text như cậu gửi: "Operating System: Windows 11..."
+                    if (empty($specs)) {
+                        $detail_blocks = $detail_xpath->query("//div[contains(@class, 'tab-content')] | //div[contains(@id, 'tab')] | //div[contains(@class, 'content')]");
+                        if ($detail_blocks && $detail_blocks->length > 0) {
+                            foreach ($detail_blocks as $block) {
+                                // Thay thẻ <br> thành dấu xuống dòng 
+ để băm nhỏ
+                                $innerHtml = $detail_dom->saveHTML($block);
+                                $innerHtml = preg_replace('/<br\s*\/?>/i', "\n", $innerHtml);
+                                $innerHtml = preg_replace('/<\/p>|<\/div>/i', "\n", $innerHtml);
+                                $text = strip_tags($innerHtml);
+                                
+                                $lines = explode("\n", $text);
+                                foreach ($lines as $line) {
+                                    $line = trim($line);
+                                    // Chỉ lấy dòng có dấu : và chia thành Key - Value
+                                    if (strpos($line, ':') !== false) {
+                                        $parts = explode(':', $line, 2);
+                                        $key = trim($parts[0]);
+                                        $val = trim($parts[1]);
+                                        // Ràng buộc độ dài của Key để không vơ nhét nhầm 1 câu văn bản dài
+                                        if (strlen($key) > 0 && strlen($key) < 50 && !empty($val)) {
+                                            $key = ltrim($key, '"'); // Xóa dấu nháy kép thừa
+                                            $specs[$key] = $val;
+                                        }
+                                    }
+                                }
+                                if(!empty($specs)) break; // Nếu bắt được rồi thì thoát lặp
+                            }
+                        }
+                    }
                 }
             }
             
-            // BƯỚC 3 (Tầng Cứu Sinh): Nếu trang chi tiết bị cấm hoặc không có bảng, chém nhỏ chuỗi tóm tắt ở ngoài
+            // --- TẦNG 3 (CỨU SINH CUỐI CÙNG): TÓM TẮT NGOÀI TRANG CHỦ ---
             if (empty($specs)) {
                 $container = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]", $nameNode);
                 if ($container->length > 0) {
                     $all_text = $container->item(0)->nodeValue;
-                    // Kích hoạt khi thấy có dấu "/" và các từ khóa đặc trưng
                     if (strpos($all_text, '/') !== false && (strpos($all_text, 'RAM') !== false || strpos($all_text, 'SSD') !== false || strpos($all_text, 'Intel') !== false || strpos($all_text, 'AMD') !== false)) {
                         $divs = $xpath->query(".//div | .//p", $container->item(0));
                         foreach($divs as $d) {
                             $t = trim($d->nodeValue);
-                            if (substr_count($t, '/') >= 2) { // Đoạn chứa nhiều '/' nhất định là cấu hình
+                            if (substr_count($t, '/') >= 2) { 
                                 $parts = explode('/', $t);
                                 foreach($parts as $idx => $p) {
                                     $p = trim($p);
@@ -215,16 +245,13 @@ try {
             
             $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
-            // Xử lý nạp liệu
             if ($is_duplicate_but_need_specs) {
-                // Sản phẩm cũ: Update bù thông số
                 $stmt_update->bindParam(":specs", $specs_json);
                 $stmt_update->bindParam(":id", $existing_product['id']);
                 if ($stmt_update->execute()) {
                     $updatedCount++;
                 }
             } else {
-                // Sản phẩm mới: Insert mới hoàn toàn
                 $stmt_insert->bindParam(":name", $product_name);
                 $stmt_insert->bindParam(":image", $image_url);
                 $stmt_insert->bindParam(":specs", $specs_json);
