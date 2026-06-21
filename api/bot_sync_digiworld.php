@@ -2,6 +2,13 @@
 // api/bot_sync_digiworld.php
 header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
+header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
+header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
+
+if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
+    http_response_code(200);
+    exit();
+}
 
 set_time_limit(0); 
 ini_set('memory_limit', '512M'); 
@@ -22,7 +29,7 @@ function fetchHTML($url) {
     ]);
     curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
-    curl_setopt($ch, CURLOPT_TIMEOUT, 15); // Timeout ngắn cho từng trang chi tiết
+    curl_setopt($ch, CURLOPT_TIMEOUT, 15); 
     
     $html = curl_exec($ch);
     curl_close($ch);
@@ -33,10 +40,24 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     
+    // 🤖 Lách lỗi cookie: Tự động khởi tạo bảng lưu trạng thái nếu chưa tồn tại
+    $db->exec("CREATE TABLE IF NOT EXISTS bot_configs (
+        meta_key VARCHAR(50) PRIMARY KEY,
+        meta_value VARCHAR(255)
+    )");
+
+    // Đọc trang cần quét tiếp theo từ dữ liệu hệ thống
+    $stmt_config = $db->prepare("SELECT meta_value FROM bot_configs WHERE meta_key = 'current_page' LIMIT 1");
+    $stmt_config->execute();
+    $config = $stmt_config->fetch(PDO::FETCH_ASSOC);
+    $start_page = $config ? (int)$config['meta_value'] : 1;
+
     $insertedCount = 0;
     $skippedCount = 0;
     $hiddenCount = 0; 
-    $page = 1;
+    $page = $start_page;
+    $pages_to_crawl = 2; // Giới hạn cào 2 trang danh mục (khoảng 40 sản phẩm sâu) mỗi lượt để tránh quá tải
+    $max_page = $start_page + $pages_to_crawl;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
     $check_query = "SELECT id FROM products WHERE product_name = :name LIMIT 1";
@@ -44,10 +65,12 @@ try {
 
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
-                     VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', :status, 'bot', :specs)";
+                     VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    while (true) {
+    $has_data = false;
+
+    while ($page < $max_page) {
         $current_url = ($page === 1) ? $base_slug . ".html" : $base_slug . "-page" . $page . ".html";
         $html = fetchHTML($current_url);
         
@@ -60,6 +83,8 @@ try {
         $nameNodes = $xpath->query("//h2[@class='name']");
         if ($nameNodes->length === 0) break; 
 
+        $has_data = true;
+
         foreach ($nameNodes as $nameNode) {
             $product_name = trim($nameNode->nodeValue);
             if (empty($product_name)) continue;
@@ -71,7 +96,7 @@ try {
                 continue; 
             }
 
-            // --- LẤY URL HÌNH ẢNH ---
+            // Trích xuất URL ảnh
             $imgNodes = $xpath->query("ancestor::*[.//img][1]//img", $nameNode);
             $image_url = "";
             if ($imgNodes->length > 0) {
@@ -92,37 +117,31 @@ try {
             }
             if (empty($image_url)) $image_url = $default_image;
 
-            // KIỂM DUYỆT ẢNH
+            // Kiểm duyệt chất lượng ảnh vật lý
             $img_lower = strtolower($image_url);
             if ($image_url === $default_image || $image_url === 'https://ict.digiworld.com.vn/' || strlen($image_url) < 35 || strpos($img_lower, 'no-image') !== false || strpos($img_lower, 'placeholder') !== false) {
                 $hiddenCount++;
                 continue; 
             }
 
-            // ==========================================
-            // THUẬT TOÁN DEEP CRAWL: VÀO TRANG CHI TIẾT LẤY THÔNG SỐ
-            // ==========================================
+            // 🔍 DEEP CRAWL: Khởi chạy động cơ bóc tách bảng thông số kỹ thuật chi tiết
             $specs = [];
             $linkNode = $xpath->query(".//a", $nameNode);
-            
             if ($linkNode->length > 0) {
                 $detail_url = trim($linkNode->item(0)->getAttribute('href'));
                 if (!empty($detail_url) && strpos($detail_url, 'http') === false) {
                     $detail_url = "https://ict.digiworld.com.vn/" . ltrim($detail_url, '/');
                 }
 
-                // Gửi request cào trang chi tiết
                 $detail_html = fetchHTML($detail_url);
                 if ($detail_html) {
                     $detail_dom = new DOMDocument();
                     @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
                     $detail_xpath = new DOMXPath($detail_dom);
 
-                    // Tìm tất cả các thẻ TR (dòng) trong bảng thông số kỹ thuật
                     $rows = $detail_xpath->query("//table//tr");
                     foreach ($rows as $row) {
                         $cols = $detail_xpath->query(".//td | .//th", $row);
-                        // Đảm bảo dòng có ít nhất 2 cột (Tên thông số và Giá trị)
                         if ($cols->length >= 2) {
                             $key = trim($cols->item(0)->nodeValue);
                             $val = trim($cols->item(1)->nodeValue);
@@ -135,35 +154,37 @@ try {
             }
             
             $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
-            $status = 'pending';
 
-            // ĐẨY VÀO DATABASE
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":image", $image_url);
             $stmt_insert->bindParam(":specs", $specs_json);
-            $stmt_insert->bindParam(":status", $status); 
             
             if($stmt_insert->execute()) {
                 $insertedCount++;
             }
         }
-        
         $page++;
-        
-        // GIỚI HẠN AN TOÀN ĐỂ KHÔNG BỊ RENDER ĐÁ VĂNG (Chỉ quét tối đa 3 trang mỗi lần gọi API)
-        if ($page > 3) { 
-            break;
-        }
     }
 
-    $log_message = "[" . date('Y-m-d H:i:s') . "] DEEP CRAWL: Scanned " . ($page - 1) . " pages. Inserted: $insertedCount (Skipped bad images: $hiddenCount). Skipped Duplicates: $skippedCount\n";
-    file_put_contents(__DIR__ . '/sync_digiworld_log.txt', $log_message, FILE_APPEND);
+    // 💾 Lưu lại trạng thái tiến trình trang để dùng cho lượt chạy kế tiếp
+    if (!$has_data || $page > 40) {
+        $next_page = 1; // Quay đầu về trang 1 nếu chạm ngưỡng giới hạn danh mục hoặc hết trang
+    } else {
+        $next_page = $page;
+    }
+
+    $stmt_update = $db->prepare("INSERT INTO bot_configs (meta_key, meta_value) VALUES ('current_page', :next_page) 
+                                 ON DUPLICATE KEY UPDATE meta_value = :next_page2");
+    $stmt_update->bindValue(':next_page', $next_page);
+    $stmt_update->bindValue(':next_page2', $next_page);
+    $stmt_update->execute();
 
     echo json_encode([
         "status" => "success",
-        "message" => "Deep Crawl hoàn tất an toàn.",
+        "message" => "Đồng bộ dữ liệu thông số tự động hoàn tất.",
         "data" => [
-            "pages_scanned" => $page - 1,
+            "scanned_pages" => "$start_page -> " . ($page - 1),
+            "next_page_schedule" => $next_page,
             "new_inserted" => $insertedCount,
             "skipped_bad_images" => $hiddenCount,
             "skipped_duplicates" => $skippedCount
@@ -174,7 +195,7 @@ try {
     http_response_code(500);
     echo json_encode([
         "status" => "error",
-        "message" => "Lỗi hệ thống Bot Crawler.",
+        "message" => "Lỗi vận hành hệ thống Bot.",
         "error_detail" => $e->getMessage()
     ]);
 }
