@@ -192,8 +192,7 @@ try {
                         $detail_blocks = $detail_xpath->query("//div[contains(@class, 'tab-content')] | //div[contains(@id, 'tab')] | //div[contains(@class, 'content')]");
                         if ($detail_blocks && $detail_blocks->length > 0) {
                             foreach ($detail_blocks as $block) {
-                                // Thay thẻ <br> thành dấu xuống dòng 
- để băm nhỏ
+                                // Thay thẻ <br> thành dấu xuống dòng để băm nhỏ
                                 $innerHtml = $detail_dom->saveHTML($block);
                                 $innerHtml = preg_replace('/<br\s*\/?>/i', "\n", $innerHtml);
                                 $innerHtml = preg_replace('/<\/p>|<\/div>/i', "\n", $innerHtml);
