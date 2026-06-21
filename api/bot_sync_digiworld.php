@@ -40,33 +40,38 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     
-    // 🤖 Lách lỗi cookie: Tự động khởi tạo bảng lưu trạng thái nếu chưa tồn tại
+    // Tự động thiết lập bảng cấu hình tiến trình nếu chưa có
     $db->exec("CREATE TABLE IF NOT EXISTS bot_configs (
         meta_key VARCHAR(50) PRIMARY KEY,
         meta_value VARCHAR(255)
     )");
 
-    // Đọc trang cần quét tiếp theo từ dữ liệu hệ thống
     $stmt_config = $db->prepare("SELECT meta_value FROM bot_configs WHERE meta_key = 'current_page' LIMIT 1");
     $stmt_config->execute();
     $config = $stmt_config->fetch(PDO::FETCH_ASSOC);
     $start_page = $config ? (int)$config['meta_value'] : 1;
 
     $insertedCount = 0;
+    $updatedCount = 0; // 🌟 Thêm bộ đếm cập nhật thông số
     $skippedCount = 0;
     $hiddenCount = 0; 
     $page = $start_page;
-    $pages_to_crawl = 2; // Giới hạn cào 2 trang danh mục (khoảng 40 sản phẩm sâu) mỗi lượt để tránh quá tải
+    $pages_to_crawl = 2; 
     $max_page = $start_page + $pages_to_crawl;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
-    $check_query = "SELECT id FROM products WHERE product_name = :name LIMIT 1";
+    // 🌟 SỬA ĐỔI TIÊU CHUẨN: Lấy thêm cả id và specifications để kiểm tra trạng thái
+    $check_query = "SELECT id, specifications FROM products WHERE product_name = :name LIMIT 1";
     $stmt_check = $db->prepare($check_query);
 
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
                      VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
+
+    // Lệnh UPDATE dùng khi sản phẩm đã có tên nhưng chưa có thông số chi tiết
+    $update_query = "UPDATE products SET specifications = :specs WHERE id = :id";
+    $stmt_update = $db->prepare($update_query);
 
     $has_data = false;
 
@@ -91,9 +96,18 @@ try {
 
             $stmt_check->bindParam(":name", $product_name);
             $stmt_check->execute();
-            if ($stmt_check->rowCount() > 0) {
-                $skippedCount++;
-                continue; 
+            $existing_product = $stmt_check->fetch(PDO::FETCH_ASSOC);
+
+            $is_duplicate_but_need_specs = false;
+
+            if ($existing_product) {
+                // Nếu sản phẩm đã có dữ liệu thông số kỹ thuật rồi -> Bỏ qua hoàn toàn
+                if (!empty($existing_product['specifications'])) {
+                    $skippedCount++;
+                    continue; 
+                }
+                // Nếu tên trùng nhưng thông số đang rỗng -> Đánh dấu để chạy luồng UPDATE
+                $is_duplicate_but_need_specs = true;
             }
 
             // Trích xuất URL ảnh
@@ -117,14 +131,14 @@ try {
             }
             if (empty($image_url)) $image_url = $default_image;
 
-            // Kiểm duyệt chất lượng ảnh vật lý
+            // Bộ lọc ảnh lỗi
             $img_lower = strtolower($image_url);
             if ($image_url === $default_image || $image_url === 'https://ict.digiworld.com.vn/' || strlen($image_url) < 35 || strpos($img_lower, 'no-image') !== false || strpos($img_lower, 'placeholder') !== false) {
                 $hiddenCount++;
                 continue; 
             }
 
-            // 🔍 DEEP CRAWL: Khởi chạy động cơ bóc tách bảng thông số kỹ thuật chi tiết
+            // 🔍 DEEP CRAWL ENGINE: Bóc tách bảng dữ liệu kỹ thuật từ trang chi tiết sản phẩm
             $specs = [];
             $linkNode = $xpath->query(".//a", $nameNode);
             if ($linkNode->length > 0) {
@@ -155,29 +169,37 @@ try {
             
             $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
-            $stmt_insert->bindParam(":name", $product_name);
-            $stmt_insert->bindParam(":image", $image_url);
-            $stmt_insert->bindParam(":specs", $specs_json);
-            
-            if($stmt_insert->execute()) {
-                $insertedCount++;
+            // Xử lý ghi dữ liệu thông minh dựa trên trạng thái thực tế
+            if ($is_duplicate_but_need_specs) {
+                $stmt_update->bindParam(":specs", $specs_json);
+                $stmt_update->bindParam(":id", $existing_product['id']);
+                if ($stmt_update->execute()) {
+                    $updatedCount++;
+                }
+            } else {
+                $stmt_insert->bindParam(":name", $product_name);
+                $stmt_insert->bindParam(":image", $image_url);
+                $stmt_insert->bindParam(":specs", $specs_json);
+                if ($stmt_insert->execute()) {
+                    $insertedCount++;
+                }
             }
         }
         $page++;
     }
 
-    // 💾 Lưu lại trạng thái tiến trình trang để dùng cho lượt chạy kế tiếp
+    // Điều hướng vòng lặp trang
     if (!$has_data || $page > 40) {
-        $next_page = 1; // Quay đầu về trang 1 nếu chạm ngưỡng giới hạn danh mục hoặc hết trang
+        $next_page = 1; 
     } else {
         $next_page = $page;
     }
 
-    $stmt_update = $db->prepare("INSERT INTO bot_configs (meta_key, meta_value) VALUES ('current_page', :next_page) 
-                                 ON DUPLICATE KEY UPDATE meta_value = :next_page2");
-    $stmt_update->bindValue(':next_page', $next_page);
-    $stmt_update->bindValue(':next_page2', $next_page);
-    $stmt_update->execute();
+    $stmt_update_config = $db->prepare("INSERT INTO bot_configs (meta_key, meta_value) VALUES ('current_page', :next_page) 
+                                        ON DUPLICATE KEY UPDATE meta_value = :next_page2");
+    $stmt_update_config->bindValue(':next_page', $next_page);
+    $stmt_update_config->bindValue(':next_page2', $next_page);
+    $stmt_update_config->execute();
 
     echo json_encode([
         "status" => "success",
@@ -186,6 +208,7 @@ try {
             "scanned_pages" => "$start_page -> " . ($page - 1),
             "next_page_schedule" => $next_page,
             "new_inserted" => $insertedCount,
+            "updated_specifications" => $updatedCount, // 🌟 Log chi tiết số sản phẩm vừa được bù thông số thành công
             "skipped_bad_images" => $hiddenCount,
             "skipped_duplicates" => $skippedCount
         ]
