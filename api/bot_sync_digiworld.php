@@ -55,7 +55,7 @@ try {
     $skippedCount = 0;
     $hiddenCount = 0; 
     $page = $start_page;
-    $pages_to_crawl = 2; 
+    $pages_to_crawl = 2; // Rút ngắn lại để hạ tầng dễ thở
     $max_page = $start_page + $pages_to_crawl;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
@@ -98,9 +98,21 @@ try {
             $is_duplicate_but_need_specs = false;
 
             if ($existing_product) {
-                if (!empty($existing_product['specifications']) && $existing_product['specifications'] !== 'null' && $existing_product['specifications'] !== '[]') {
-                    // Nếu thông số đang là mảng thô (Cấu hình cơ bản 1) thì cho phép ghi đè
-                    if (strpos($existing_product['specifications'], 'Cấu hình cơ bản 1') === false) {
+                $specs_str = $existing_product['specifications'];
+                if (!empty($specs_str) && $specs_str !== 'null' && $specs_str !== '[]') {
+                    // GIẢI MÃ JSON ĐỂ KIỂM TRA CHÍNH XÁC (Tránh lỗi Unicode Encoding)
+                    $decoded = json_decode($specs_str, true);
+                    $is_basic = false;
+                    if (is_array($decoded)) {
+                        foreach (array_keys($decoded) as $k) {
+                            if (strpos($k, 'Cấu hình') !== false) {
+                                $is_basic = true; break;
+                            }
+                        }
+                    }
+                    
+                    // Nếu đã có thông số xịn (không phải cấu hình cơ bản) -> Bỏ qua
+                    if (!$is_basic) {
                         $skippedCount++;
                         continue; 
                     }
@@ -135,7 +147,7 @@ try {
             }
 
             // ==========================================
-            // 🚀 ĐỘNG CƠ BÓC TÁCH THÔNG SỐ V5 (TỐI THƯỢNG)
+            // 🚀 ĐỘNG CƠ V6: CHỐNG CHẶN IP & ÉP KIỂU RAW TEXT
             // ==========================================
             $specs = [];
             $detail_url = "";
@@ -156,6 +168,9 @@ try {
                 if (strpos($detail_url, 'http') === false) {
                     $detail_url = "https://ict.digiworld.com.vn/" . ltrim($detail_url, '/');
                 }
+
+                // 🛑 BẢO MẬT: NGHỈ 0.5 GIÂY ĐỂ TRÁNH BỊ TƯỜNG LỬA DIGIWORLD CHẶN KẾT NỐI
+                usleep(500000); 
 
                 $detail_html = fetchHTML($detail_url);
                 if ($detail_html) {
@@ -180,47 +195,48 @@ try {
                                 $val = trim(strip_tags($cols->item(1)->nodeValue));
                             }
                         }
-                        
                         if (!empty($key) && !empty($val) && $key !== 'Thông số' && $key !== 'Đặc tính') {
                             $specs[$key] = $val;
                         }
                     }
 
-                    // --- TẦNG 2: BẮT MẠCH KHỐI RAW TEXT CÓ DẤU HAI CHẤM ":" ---
-                    // Dành cho trường hợp Digiworld vứt nguyên đống text như cậu gửi: "Operating System: Windows 11..."
+                    // --- TẦNG 2: ÉP KIỂU VĂN BẢN THÔ TOÀN BỘ TRANG CHI TIẾT ---
                     if (empty($specs)) {
-                        $detail_blocks = $detail_xpath->query("//div[contains(@class, 'tab-content')] | //div[contains(@id, 'tab')] | //div[contains(@class, 'content')]");
-                        if ($detail_blocks && $detail_blocks->length > 0) {
-                            foreach ($detail_blocks as $block) {
-                                // Thay thẻ <br> thành dấu xuống dòng để băm nhỏ
-                                $innerHtml = $detail_dom->saveHTML($block);
-                                $innerHtml = preg_replace('/<br\s*\/?>/i', "\n", $innerHtml);
-                                $innerHtml = preg_replace('/<\/p>|<\/div>/i', "\n", $innerHtml);
-                                $text = strip_tags($innerHtml);
+                        $clean_html = preg_replace('/<script\b[^>]*>(.*?)<\/script>/is', "", $detail_html);
+                        $clean_html = preg_replace('/<style\b[^>]*>(.*?)<\/style>/is', "", $clean_html);
+                        $clean_html = preg_replace('/<br\s*\/?>/i', "\n", $clean_html);
+                        $clean_html = preg_replace('/<\/p>|<\/div>|<\/li>|<\/tr>/i', "\n", $clean_html);
+                        $clean_text = strip_tags($clean_html);
+                        
+                        $lines = explode("\n", $clean_text);
+                        $temp_specs = [];
+                        foreach ($lines as $line) {
+                            $line = trim(preg_replace('/\s+/', ' ', $line)); 
+                            if (strpos($line, ':') !== false) {
+                                $parts = explode(':', $line, 2);
+                                $key = trim($parts[0]);
+                                $val = trim($parts[1]);
                                 
-                                $lines = explode("\n", $text);
-                                foreach ($lines as $line) {
-                                    $line = trim($line);
-                                    // Chỉ lấy dòng có dấu : và chia thành Key - Value
-                                    if (strpos($line, ':') !== false) {
-                                        $parts = explode(':', $line, 2);
-                                        $key = trim($parts[0]);
-                                        $val = trim($parts[1]);
-                                        // Ràng buộc độ dài của Key để không vơ nhét nhầm 1 câu văn bản dài
-                                        if (strlen($key) > 0 && strlen($key) < 50 && !empty($val)) {
-                                            $key = ltrim($key, '"'); // Xóa dấu nháy kép thừa
-                                            $specs[$key] = $val;
+                                // Ràng buộc: Key chỉ từ 2 đến 45 ký tự, không chứa thẻ HTML
+                                if (strlen($key) >= 2 && strlen($key) <= 45 && strlen($val) > 0) {
+                                    if (!preg_match('/[{}<>]/', $key)) {
+                                        $lower_key = mb_strtolower($key);
+                                        $noise = ['hotline', 'email', 'fax', 'điện thoại', 'địa chỉ', 'liên hệ', 'website', 'trang chủ', 'chú ý'];
+                                        if (!in_array($lower_key, $noise)) {
+                                            $temp_specs[$key] = $val;
                                         }
                                     }
                                 }
-                                if(!empty($specs)) break; // Nếu bắt được rồi thì thoát lặp
                             }
+                        }
+                        if (count($temp_specs) >= 4) {
+                            $specs = $temp_specs;
                         }
                     }
                 }
             }
             
-            // --- TẦNG 3 (CỨU SINH CUỐI CÙNG): TÓM TẮT NGOÀI TRANG CHỦ ---
+            // --- TẦNG 3: FALLBACK TRANG CHỦ KHI LINK DETAIL CHẾT ---
             if (empty($specs)) {
                 $container = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]", $nameNode);
                 if ($container->length > 0) {
