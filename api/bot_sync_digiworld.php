@@ -23,11 +23,11 @@ function fetchHTML($url) {
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
-        "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Accept: text/html,application/xhtml+xml",
+        "Accept-Language: vi-VN,vi;q=0.9",
         "Cache-Control: max-age=0"
     ]);
-    curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36");
+    curl_setopt($ch, CURLOPT_USERAGENT, "Mozilla/5.0 (Windows NT 10.0; Win64; x64)");
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 15); 
     
@@ -40,7 +40,6 @@ try {
     $database = new Database();
     $db = $database->getConnection();
     
-    // Tự động thiết lập bảng cấu hình tiến trình nếu chưa có
     $db->exec("CREATE TABLE IF NOT EXISTS bot_configs (
         meta_key VARCHAR(50) PRIMARY KEY,
         meta_value VARCHAR(255)
@@ -52,7 +51,7 @@ try {
     $start_page = $config ? (int)$config['meta_value'] : 1;
 
     $insertedCount = 0;
-    $updatedCount = 0; // 🌟 Thêm bộ đếm cập nhật thông số
+    $updatedCount = 0; 
     $skippedCount = 0;
     $hiddenCount = 0; 
     $page = $start_page;
@@ -60,7 +59,6 @@ try {
     $max_page = $start_page + $pages_to_crawl;
     $default_image = "https://via.placeholder.com/400x300?text=No+Image+Available"; 
 
-    // 🌟 SỬA ĐỔI TIÊU CHUẨN: Lấy thêm cả id và specifications để kiểm tra trạng thái
     $check_query = "SELECT id, specifications FROM products WHERE product_name = :name LIMIT 1";
     $stmt_check = $db->prepare($check_query);
 
@@ -69,7 +67,6 @@ try {
                      VALUES (:name, NULL, 0, :image, 'Sản phẩm đồng bộ tự động từ Digiworld', 'Digiworld', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    // Lệnh UPDATE dùng khi sản phẩm đã có tên nhưng chưa có thông số chi tiết
     $update_query = "UPDATE products SET specifications = :specs WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
 
@@ -101,12 +98,12 @@ try {
             $is_duplicate_but_need_specs = false;
 
             if ($existing_product) {
-                // Nếu sản phẩm đã có dữ liệu thông số kỹ thuật rồi -> Bỏ qua hoàn toàn
-                if (!empty($existing_product['specifications'])) {
+                // Kiểm tra gắt gao: Nếu đã có thông số (khác rỗng, khác null, khác chuỗi json rỗng) thì mới bỏ qua
+                if (!empty($existing_product['specifications']) && $existing_product['specifications'] !== 'null' && $existing_product['specifications'] !== '[]') {
                     $skippedCount++;
                     continue; 
                 }
-                // Nếu tên trùng nhưng thông số đang rỗng -> Đánh dấu để chạy luồng UPDATE
+                // Tên đã có nhưng thông số trống -> Mở cổng cào bổ sung
                 $is_duplicate_but_need_specs = true;
             }
 
@@ -131,19 +128,34 @@ try {
             }
             if (empty($image_url)) $image_url = $default_image;
 
-            // Bộ lọc ảnh lỗi
             $img_lower = strtolower($image_url);
             if ($image_url === $default_image || $image_url === 'https://ict.digiworld.com.vn/' || strlen($image_url) < 35 || strpos($img_lower, 'no-image') !== false || strpos($img_lower, 'placeholder') !== false) {
                 $hiddenCount++;
                 continue; 
             }
 
-            // 🔍 DEEP CRAWL ENGINE: Bóc tách bảng dữ liệu kỹ thuật từ trang chi tiết sản phẩm
+            // ==========================================
+            // 🚀 ĐỘNG CƠ BÓC TÁCH THÔNG SỐ V4 (BẤT BẠI)
+            // ==========================================
             $specs = [];
-            $linkNode = $xpath->query(".//a", $nameNode);
-            if ($linkNode->length > 0) {
-                $detail_url = trim($linkNode->item(0)->getAttribute('href'));
-                if (!empty($detail_url) && strpos($detail_url, 'http') === false) {
+            $detail_url = "";
+
+            // BƯỚC 1: Săn Link (Quét toàn bộ thẻ cha chứa sản phẩm để tìm thẻ a có đuôi html)
+            $aTags = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]//a", $nameNode);
+            if ($aTags !== false) {
+                foreach($aTags as $a) {
+                    $href = $a->getAttribute('href');
+                    if (strpos($href, '.html') !== false) {
+                        $detail_url = $href;
+                        break;
+                    }
+                }
+            }
+
+            // BƯỚC 2: Chui vào trang chi tiết và nhổ bật gốc cái bảng
+            if (!empty($detail_url)) {
+                $detail_url = trim($detail_url);
+                if (strpos($detail_url, 'http') === false) {
                     $detail_url = "https://ict.digiworld.com.vn/" . ltrim($detail_url, '/');
                 }
 
@@ -155,12 +167,46 @@ try {
 
                     $rows = $detail_xpath->query("//table//tr");
                     foreach ($rows as $row) {
-                        $cols = $detail_xpath->query(".//td | .//th", $row);
-                        if ($cols->length >= 2) {
-                            $key = trim($cols->item(0)->nodeValue);
-                            $val = trim($cols->item(1)->nodeValue);
-                            if (!empty($key) && !empty($val)) {
-                                $specs[$key] = $val;
+                        $th = $detail_xpath->query(".//th", $row);
+                        $td = $detail_xpath->query(".//td", $row);
+                        
+                        $key = ""; $val = "";
+                        // Hỗ trợ cả 2 định dạng bảng: th-td và td-td
+                        if ($th->length > 0 && $td->length > 0) {
+                            $key = trim(strip_tags($th->item(0)->nodeValue));
+                            $val = trim(strip_tags($td->item(0)->nodeValue));
+                        } else {
+                            $cols = $detail_xpath->query(".//td", $row);
+                            if ($cols->length >= 2) {
+                                $key = trim(strip_tags($cols->item(0)->nodeValue));
+                                $val = trim(strip_tags($cols->item(1)->nodeValue));
+                            }
+                        }
+                        
+                        if (!empty($key) && !empty($val) && $key !== 'Thông số' && $key !== 'Đặc tính') {
+                            $specs[$key] = $val;
+                        }
+                    }
+                }
+            }
+            
+            // BƯỚC 3 (Tầng Cứu Sinh): Nếu trang chi tiết bị cấm hoặc không có bảng, chém nhỏ chuỗi tóm tắt ở ngoài
+            if (empty($specs)) {
+                $container = $xpath->query("ancestor::*[contains(@class, 'item') or contains(@class, 'product')][1]", $nameNode);
+                if ($container->length > 0) {
+                    $all_text = $container->item(0)->nodeValue;
+                    // Kích hoạt khi thấy có dấu "/" và các từ khóa đặc trưng
+                    if (strpos($all_text, '/') !== false && (strpos($all_text, 'RAM') !== false || strpos($all_text, 'SSD') !== false || strpos($all_text, 'Intel') !== false || strpos($all_text, 'AMD') !== false)) {
+                        $divs = $xpath->query(".//div | .//p", $container->item(0));
+                        foreach($divs as $d) {
+                            $t = trim($d->nodeValue);
+                            if (substr_count($t, '/') >= 2) { // Đoạn chứa nhiều '/' nhất định là cấu hình
+                                $parts = explode('/', $t);
+                                foreach($parts as $idx => $p) {
+                                    $p = trim($p);
+                                    if(!empty($p)) $specs["Cấu hình cơ bản ".($idx+1)] = $p;
+                                }
+                                break;
                             }
                         }
                     }
@@ -169,14 +215,16 @@ try {
             
             $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
-            // Xử lý ghi dữ liệu thông minh dựa trên trạng thái thực tế
+            // Xử lý nạp liệu
             if ($is_duplicate_but_need_specs) {
+                // Sản phẩm cũ: Update bù thông số
                 $stmt_update->bindParam(":specs", $specs_json);
                 $stmt_update->bindParam(":id", $existing_product['id']);
                 if ($stmt_update->execute()) {
                     $updatedCount++;
                 }
             } else {
+                // Sản phẩm mới: Insert mới hoàn toàn
                 $stmt_insert->bindParam(":name", $product_name);
                 $stmt_insert->bindParam(":image", $image_url);
                 $stmt_insert->bindParam(":specs", $specs_json);
@@ -188,7 +236,6 @@ try {
         $page++;
     }
 
-    // Điều hướng vòng lặp trang
     if (!$has_data || $page > 40) {
         $next_page = 1; 
     } else {
@@ -208,7 +255,7 @@ try {
             "scanned_pages" => "$start_page -> " . ($page - 1),
             "next_page_schedule" => $next_page,
             "new_inserted" => $insertedCount,
-            "updated_specifications" => $updatedCount, // 🌟 Log chi tiết số sản phẩm vừa được bù thông số thành công
+            "updated_specifications" => $updatedCount,
             "skipped_bad_images" => $hiddenCount,
             "skipped_duplicates" => $skippedCount
         ]
