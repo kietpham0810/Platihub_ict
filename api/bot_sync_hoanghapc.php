@@ -36,6 +36,161 @@ function fetchHTML($url) {
     return $html;
 }
 
+function resolveAbsoluteUrl($url, $baseUrl) {
+    $url = trim($url);
+    if (empty($url)) {
+        return '';
+    }
+    if (strpos($url, '//') === 0) {
+        return 'https:' . $url;
+    }
+    if (preg_match('#^https?://#i', $url)) {
+        return $url;
+    }
+    $baseParts = parse_url($baseUrl);
+    if (empty($baseParts['scheme']) || empty($baseParts['host'])) {
+        return $url;
+    }
+    $scheme = $baseParts['scheme'];
+    $host = $baseParts['host'];
+    $port = isset($baseParts['port']) ? ':' . $baseParts['port'] : '';
+
+    if (strpos($url, '/') === 0) {
+        return "$scheme://$host$port" . $url;
+    }
+
+    $path = isset($baseParts['path']) ? $baseParts['path'] : '/';
+    $dir = preg_replace('#/[^/]*$#', '/', $path);
+    return "$scheme://$host$port" . rtrim($dir, '/') . '/' . ltrim($url, '/');
+}
+
+function extractImageUrlFromNode($node, $baseUrl) {
+    $attrs = ['content', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-srcset', 'srcset', 'src'];
+    foreach ($attrs as $attr) {
+        if (!$node->hasAttribute($attr)) {
+            continue;
+        }
+        $value = trim($node->getAttribute($attr));
+        if ($value === '') {
+            continue;
+        }
+        if (stripos($value, 'data:image') === 0) {
+            continue;
+        }
+        if ($attr === 'srcset' || $attr === 'data-srcset') {
+            $parts = preg_split('/\s*,\s*/', $value);
+            foreach ($parts as $part) {
+                $candidate = trim(explode(' ', $part)[0]);
+                if ($candidate !== '') {
+                    $value = $candidate;
+                    break;
+                }
+            }
+        }
+        return resolveAbsoluteUrl($value, $baseUrl);
+    }
+    return '';
+}
+
+function findProductImageUrl($xpath, $baseUrl) {
+    $queries = [
+        "//meta[@property='og:image']",
+        "//meta[@property='og:image:secure_url']",
+        "//meta[@name='twitter:image']",
+        "//meta[@name='og:image']",
+        "//div[contains(@class, 'product-image')]//img",
+        "//div[contains(@class, 'gallery')]//img",
+        "//div[contains(@class, 'thumb')]//img",
+        "//figure//img",
+        "//picture//img",
+        "//img[contains(@class, 'p-image') or contains(@class, 'product-image') or contains(@class, 'p-picture') or contains(@class, 'product-gallery') or contains(@class, 'p-thumb') or contains(@class, 'slider') or contains(@class, 'lazy') or contains(@class, 'thumbnail')]",
+        "//img"
+    ];
+
+    foreach ($queries as $query) {
+        $nodes = $xpath->query($query);
+        foreach ($nodes as $node) {
+            $image = extractImageUrlFromNode($node, $baseUrl);
+            if (!empty($image)) {
+                return $image;
+            }
+        }
+    }
+
+    $styleNodes = $xpath->query("//*[contains(@style, 'background-image')]");
+    foreach ($styleNodes as $node) {
+        $style = $node->getAttribute('style');
+        if (preg_match('/background-image\s*:\s*url\(([^)]+)\)/i', $style, $m)) {
+            $url = trim($m[1], "'\" ");
+            if ($url !== '' && stripos($url, 'data:image') !== 0) {
+                return resolveAbsoluteUrl($url, $baseUrl);
+            }
+        }
+    }
+
+    return '';
+}
+
+function getPublicImageUrl($localFile) {
+    $filename = basename($localFile);
+    $publicPath = '/images/hoanghapc/' . $filename;
+    $publicPath = preg_replace('#/+#', '/', $publicPath);
+
+    if (!empty($_SERVER['HTTP_HOST'])) {
+        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
+        return $protocol . '://' . $_SERVER['HTTP_HOST'] . $publicPath;
+    }
+    return $publicPath;
+}
+
+function downloadRemoteImage($imageUrl, $saveDir) {
+    $imageUrl = trim($imageUrl);
+    if (empty($imageUrl) || stripos($imageUrl, 'data:image') === 0) {
+        return null;
+    }
+
+    if (!is_dir($saveDir)) {
+        @mkdir($saveDir, 0755, true);
+    }
+    $saveDir = rtrim($saveDir, DIRECTORY_SEPARATOR) . DIRECTORY_SEPARATOR;
+
+    $parsed = parse_url($imageUrl);
+    $ext = pathinfo($parsed['path'] ?? '', PATHINFO_EXTENSION);
+    if (!preg_match('/^[a-zA-Z0-9]{1,5}$/', $ext)) {
+        $ext = 'jpg';
+    }
+
+    $filename = md5($imageUrl) . '.' . $ext;
+    $localFile = $saveDir . $filename;
+    if (file_exists($localFile)) {
+        return getPublicImageUrl($localFile);
+    }
+
+    $ch = curl_init($imageUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $imageData = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($imageData === false || $httpCode !== 200) {
+        return null;
+    }
+
+    if (file_put_contents($localFile, $imageData) !== false) {
+        return getPublicImageUrl($localFile);
+    }
+    return null;
+}
+
 // BẮT LINK TỪ FRONTEND TRUYỀN XUỐNG
 $target_url = isset($_GET['url']) ? trim($_GET['url']) : '';
 
@@ -52,6 +207,7 @@ try {
     $updatedCount = 0; 
     $skippedCount = 0;
     $default_image = "https://via.placeholder.com/400x300?text=Hoang+Ha+PC"; 
+    $image_save_dir = realpath(__DIR__ . '/../images/hoanghapc') ?: (__DIR__ . '/../images/hoanghapc');
 
     // CHUẨN BỊ VŨ KHÍ SQL
     $check_query = "SELECT id, specifications FROM products WHERE product_name = :name LIMIT 1";
@@ -126,17 +282,14 @@ try {
         }
         if ($price_val == 0) $price_val = null; // Để null nếu không có giá
 
-        // 3. Lấy Hình Ảnh
-        $imgNode = $detail_xpath->query("//div[contains(@class, 'p-picture')]//img | //div[@id='img-detail']//img | //div[contains(@class, 'product-image')]//img");
+        // 3. Lấy Hình Ảnh (Tối ưu hóa theo nhiều nguồn: OG, Twitter, img src, srcset, data-src, background-image)
         $image_url = $default_image;
-        if ($imgNode->length > 0) {
-            $img = $imgNode->item(0);
-            $src = $img->getAttribute('src') ?: $img->getAttribute('data-src');
-            if (!empty($src)) {
-                if (strpos($src, 'http') === false) {
-                    $src = "https://hoanghapc.vn" . $src;
-                }
-                $image_url = $src;
+        $found_image = findProductImageUrl($detail_xpath, $link);
+        if (!empty($found_image)) {
+            $image_url = $found_image;
+            $downloaded = downloadRemoteImage($image_url, $image_save_dir);
+            if ($downloaded) {
+                $image_url = $downloaded;
             }
         }
 
