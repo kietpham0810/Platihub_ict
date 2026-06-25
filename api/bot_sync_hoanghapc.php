@@ -293,7 +293,7 @@ try {
             }
         }
 
-        // 4. Lấy Cấu Hình (Template Matching 8 trường cố định)
+        // 4. Lấy Cấu Hình (Template Matching nhưng giữ giá trị thực tế)
         $template_specs = [
             'CPU' => '',
             'MAIN' => '',
@@ -305,43 +305,55 @@ try {
             'CASE' => ''
         ];
 
+        $specs = [];
         $rows = $detail_xpath->query("//table//tr | //div[contains(@class, 'specifications')]//li");
         foreach ($rows as $row) {
             if (!$row) {
                 continue;
             }
 
-            $text = trim(strip_tags($row->nodeValue));
-            if ($text === '') {
+            $rowText = trim(strip_tags($row->nodeValue));
+            if ($rowText === '') {
                 continue;
             }
 
-            $upperText = mb_strtoupper($text, 'UTF-8');
+            $label = '';
             $value = '';
 
-            if (strpos($text, ':') !== false) {
-                $parts = explode(':', $text, 2);
+            $tds = $detail_xpath->query(".//td", $row);
+            if ($tds->length >= 2) {
+                $label = trim(strip_tags($tds->item(0)->nodeValue));
+                $value = trim(strip_tags($tds->item(1)->nodeValue));
+            } else {
+                $ths = $detail_xpath->query(".//th", $row);
+                if ($ths->length > 0) {
+                    $label = trim(strip_tags($ths->item(0)->nodeValue));
+                    $value = trim(strip_tags($row->nodeValue));
+                    $value = trim(str_replace($label, '', $value));
+                }
+            }
+
+            if ($label === '' && strpos($rowText, ':') !== false) {
+                $parts = explode(':', $rowText, 2);
+                $label = trim($parts[0]);
                 $value = trim($parts[1]);
             }
 
             if ($value === '') {
-                $tds = $detail_xpath->query(".//td", $row);
-                if ($tds->length >= 2) {
-                    $value = trim(strip_tags($tds->item(1)->nodeValue));
+                $strongNode = $detail_xpath->query(".//strong|.//b", $row);
+                if ($strongNode->length > 0) {
+                    $label = trim(strip_tags($strongNode->item(0)->nodeValue));
+                    $value = trim(str_replace($label, '', $rowText));
                 }
             }
 
-            if ($value === '') {
-                $strong = $detail_xpath->query(".//strong|.//b", $row);
-                if ($strong->length > 0) {
-                    $label = trim(strip_tags($strong->item(0)->nodeValue));
-                    $value = trim(str_replace($label, '', $text));
-                }
+            if ($label === '' && $value === '') {
+                continue;
             }
 
             if ($value === '') {
-                $value = trim(preg_replace('/^.*?(CPU|CHIP|MAIN|BO MẠCH|MOTHERBOARD|TẢN NHIỆT|TAN NHIET|COOL|AIO|FAN|WATER|LIQUID|RAM|MEMORY|DDR4|DDR5|DDR3|SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG|VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|NGUỒN|NGUON|PSU|POWER|WATT|WATTS|CASE|VỎ|VO|THÙNG|THUNG|CABINET)\s*[:\-–]?\s*/iu', '', $text));
-                if ($value === $text) {
+                $value = trim(preg_replace('/^.*?(CPU|CHIP|MAIN|BO MẠCH|MOTHERBOARD|TẢN NHIỆT|TAN NHIỆT|COOL|AIO|FAN|WATER|LIQUID|RAM|MEMORY|DDR4|DDR5|DDR3|SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG|VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|NGUỒN|NGUON|PSU|POWER|WATT|WATTS|CASE|VỎ|VO|THÙNG|THUNG|CABINET)\s*[:\-–]?\s*/iu', '', $rowText));
+                if ($value === $rowText) {
                     $value = '';
                 }
             }
@@ -350,43 +362,36 @@ try {
                 continue;
             }
 
-            if ($template_specs['CPU'] === '' && preg_match('/\b(CPU|CHIP|I3|I5|I7|I9|RYZEN|INTEL|AMD)\b/i', $upperText)) {
-                $template_specs['CPU'] = $value;
-                continue;
+            if ($label === '') {
+                $label = $rowText;
             }
-            if ($template_specs['MAIN'] === '' && preg_match('/\b(MAIN|BO MẠCH|MOTHERBOARD|Z790|B760|H610|B650|X670|Z690|B550|X570)\b/i', $upperText)) {
-                $template_specs['MAIN'] = $value;
-                continue;
+
+            $upperLabel = mb_strtoupper($label, 'UTF-8');
+            $mappedKey = '';
+            if (preg_match('/\b(CPU|CHIP|I3|I5|I7|I9|RYZEN|INTEL|AMD)\b/i', $upperLabel)) {
+                $mappedKey = 'CPU';
+            } elseif (preg_match('/\b(MAIN|BO MẠCH|MOTHERBOARD|Z790|B760|H610|B650|X670|Z690|B550|X570)\b/i', $upperLabel)) {
+                $mappedKey = 'MAIN';
+            } elseif (preg_match('/\b(TẢN NHIỆT|TAN NHIỆT|COOL|AIO|FAN|WATER|LIQUID)\b/i', $upperLabel)) {
+                $mappedKey = 'TẢN NHIỆT';
+            } elseif (preg_match('/\b(RAM|MEMORY|DDR4|DDR5|DDR3|LPDDR5X|LPDDR4X|LPDDR4)\b/i', $upperLabel)) {
+                $mappedKey = 'RAM';
+            } elseif (preg_match('/\b(SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG)\b/i', $upperLabel)) {
+                $mappedKey = 'SSD';
+            } elseif (preg_match('/\b(VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|GPU)\b/i', $upperLabel)) {
+                $mappedKey = 'VGA';
+            } elseif (preg_match('/\b(NGUỒN|NGUON|PSU|POWER|WATT|WATTS|ADAPTER)\b/i', $upperLabel)) {
+                $mappedKey = 'PSU';
+            } elseif (preg_match('/\b(CASE|VỎ|VO|THÙNG|THUNG|CABINET)\b/i', $upperLabel)) {
+                $mappedKey = 'CASE';
             }
-            if ($template_specs['TẢN NHIỆT'] === '' && preg_match('/\b(TẢN NHIỆT|TAN NHIET|COOL|AIO|FAN|WATER|LIQUID)\b/i', $upperText)) {
-                $template_specs['TẢN NHIỆT'] = $value;
-                continue;
-            }
-            if ($template_specs['RAM'] === '' && preg_match('/\b(RAM|MEMORY|DDR4|DDR5|DDR3)\b/i', $upperText)) {
-                $template_specs['RAM'] = $value;
-                continue;
-            }
-            if ($template_specs['SSD'] === '' && preg_match('/\b(SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG)\b/i', $upperText)) {
-                $template_specs['SSD'] = $value;
-                continue;
-            }
-            if ($template_specs['VGA'] === '' && preg_match('/\b(VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS)\b/i', $upperText)) {
-                $template_specs['VGA'] = $value;
-                continue;
-            }
-            if ($template_specs['PSU'] === '' && preg_match('/\b(NGUỒN|NGUON|PSU|POWER|WATT|WATTS)\b/i', $upperText)) {
-                $template_specs['PSU'] = $value;
-                continue;
-            }
-            if ($template_specs['CASE'] === '' && preg_match('/\b(CASE|VỎ|VO|THÙNG|THUNG|CABINET)\b/i', $upperText)) {
-                $template_specs['CASE'] = $value;
-                continue;
+
+            $finalKey = $mappedKey !== '' ? $mappedKey : $label;
+            if (!isset($specs[$finalKey]) || $specs[$finalKey] === '') {
+                $specs[$finalKey] = $value;
             }
         }
 
-        $specs = array_filter($template_specs, function ($item) {
-            return $item !== '';
-        });
         $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
         // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
