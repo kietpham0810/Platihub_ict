@@ -293,46 +293,85 @@ try {
             }
         }
 
-        // 4. Lấy Cấu Hình (Lọc chuẩn hóa CPU, Main, RAM, VGA...)
-        $specs = [];
+        // 4. Lấy Cấu Hình (Template Matching 8 trường cố định)
+        $template_specs = [
+            'CPU' => '',
+            'MAIN' => '',
+            'TẢN NHIỆT' => '',
+            'RAM' => '',
+            'SSD' => '',
+            'VGA' => '',
+            'PSU' => '',
+            'CASE' => ''
+        ];
+
         $rows = $detail_xpath->query("//table//tr | //div[contains(@class, 'specifications')]//li");
-        
         foreach ($rows as $row) {
-            $tds = $detail_xpath->query(".//td", $row);
-            $key = ""; $val = "";
-            
-            if ($tds->length >= 2) {
-                $key = trim(strip_tags($tds->item(0)->nodeValue));
-                $val = trim(strip_tags($tds->item(1)->nodeValue));
-            } else {
-                // Xử lý nếu web dùng dạng <li><strong>CPU:</strong> Core i5...</li>
-                $text = trim(strip_tags($row->nodeValue));
-                if (strpos($text, ':') !== false) {
-                    $parts = explode(':', $text, 2);
-                    $key = trim($parts[0]);
-                    $val = trim($parts[1]);
+            if (!$row) {
+                continue;
+            }
+
+            $text = trim(strip_tags($row->nodeValue));
+            if ($text === '') {
+                continue;
+            }
+
+            $value = '';
+            $upperText = mb_strtoupper($text, 'UTF-8');
+
+            if (strpos($text, ':') !== false) {
+                $parts = explode(':', $text, 2);
+                $value = trim($parts[1]);
+            }
+
+            if ($value === '') {
+                $tds = $detail_xpath->query(".//td", $row);
+                if ($tds->length >= 2) {
+                    $value = trim(strip_tags($tds->item(1)->nodeValue));
                 }
             }
 
-            if (!empty($key) && !empty($val)) {
-                // CHUẨN HÓA KEYWORD ĐỂ LỌC DỄ DÀNG SAU NÀY
-                $k_upper = strtoupper($key);
-                if (strpos($k_upper, 'CPU') !== false || strpos($k_upper, 'CHIP') !== false) $key = "Vi xử lý (CPU)";
-                elseif (strpos($k_upper, 'MAIN') !== false || strpos($k_upper, 'BO MẠCH') !== false) $key = "Mainboard";
-                elseif (strpos($k_upper, 'RAM') !== false) $key = "Bộ nhớ RAM";
-                elseif (strpos($k_upper, 'VGA') !== false || strpos($k_upper, 'CARD') !== false) $key = "Card đồ họa (VGA)";
-                elseif (strpos($k_upper, 'SSD') !== false || strpos($k_upper, 'HDD') !== false || strpos($k_upper, 'Ổ CỨNG') !== false) $key = "Ổ cứng lưu trữ";
-                elseif (strpos($k_upper, 'NGUỒN') !== false || strpos($k_upper, 'PSU') !== false) $key = "Nguồn (PSU)";
-                elseif (strpos($k_upper, 'CASE') !== false || strpos($k_upper, 'VỎ') !== false) $key = "Vỏ Case";
-                elseif (strpos($k_upper, 'TẢN NHIỆT') !== false || strpos($k_upper, 'COOLING') !== false) $key = "Tản nhiệt (Cooling)";
-                
-                // Tránh ghi đè nếu web ghi 2 dòng cùng tên
-                if(!isset($specs[$key])) {
-                    $specs[$key] = $val;
-                }
+            if ($value === '') {
+                continue;
+            }
+
+            if ($template_specs['CPU'] === '' && preg_match('/\b(CPU|CHIP|I3|I5|I7|I9|RYZEN|INTEL|AMD)\b/i', $upperText)) {
+                $template_specs['CPU'] = $value;
+                continue;
+            }
+            if ($template_specs['MAIN'] === '' && preg_match('/\b(MAIN|BO MẠCH|MOTHERBOARD|Z790|B760|H610|B650|X670|Z690|B550|X570)\b/i', $upperText)) {
+                $template_specs['MAIN'] = $value;
+                continue;
+            }
+            if ($template_specs['TẢN NHIỆT'] === '' && preg_match('/\b(TẢN NHIỆT|TAN NHIET|COOL|AIO|FAN|WATER|LIQUID)\b/i', $upperText)) {
+                $template_specs['TẢN NHIỆT'] = $value;
+                continue;
+            }
+            if ($template_specs['RAM'] === '' && preg_match('/\b(RAM|MEMORY|DDR4|DDR5|DDR3)\b/i', $upperText)) {
+                $template_specs['RAM'] = $value;
+                continue;
+            }
+            if ($template_specs['SSD'] === '' && preg_match('/\b(SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG)\b/i', $upperText)) {
+                $template_specs['SSD'] = $value;
+                continue;
+            }
+            if ($template_specs['VGA'] === '' && preg_match('/\b(VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS)\b/i', $upperText)) {
+                $template_specs['VGA'] = $value;
+                continue;
+            }
+            if ($template_specs['PSU'] === '' && preg_match('/\b(NGUỒN|NGUON|PSU|POWER|WATT|WATTS)\b/i', $upperText)) {
+                $template_specs['PSU'] = $value;
+                continue;
+            }
+            if ($template_specs['CASE'] === '' && preg_match('/\b(CASE|VỎ|VO|THÙNG|THUNG|CABINET)\b/i', $upperText)) {
+                $template_specs['CASE'] = $value;
+                continue;
             }
         }
 
+        $specs = array_filter($template_specs, function ($item) {
+            return $item !== '';
+        });
         $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
         // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
