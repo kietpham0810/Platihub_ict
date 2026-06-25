@@ -131,14 +131,40 @@ function findProductImageUrl($xpath, $baseUrl) {
     return '';
 }
 
+function getRequestProtocol() {
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
+        return strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https' ? 'https' : 'http';
+    }
+    if (!empty($_SERVER['REQUEST_SCHEME'])) {
+        return strtolower($_SERVER['REQUEST_SCHEME']);
+    }
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
+        return 'https';
+    }
+    return 'http';
+}
+
+function normalizeImageUrl($url) {
+    $url = trim($url);
+    if ($url === '') {
+        return '';
+    }
+    if (strpos($url, '//') === 0) {
+        return 'https:' . $url;
+    }
+    if (preg_match('#^https?://#i', $url)) {
+        return preg_replace('#^http://#i', 'https://', $url);
+    }
+    return $url;
+}
+
 function getPublicImageUrl($localFile) {
     $filename = basename($localFile);
     $publicPath = '/images/hoanghapc/' . $filename;
     $publicPath = preg_replace('#/+#', '/', $publicPath);
 
     if (!empty($_SERVER['HTTP_HOST'])) {
-        $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? 'https' : 'http';
-        return $protocol . '://' . $_SERVER['HTTP_HOST'] . $publicPath;
+        return getRequestProtocol() . '://' . $_SERVER['HTTP_HOST'] . $publicPath;
     }
     return $publicPath;
 }
@@ -182,13 +208,18 @@ function downloadRemoteImage($imageUrl, $saveDir) {
     curl_close($ch);
 
     if ($imageData === false || $httpCode !== 200) {
-        return null;
+        return $imageUrl;
     }
 
     if (file_put_contents($localFile, $imageData) !== false) {
-        return getPublicImageUrl($localFile);
+        $savedUrl = getPublicImageUrl($localFile);
+        if (stripos($savedUrl, 'http://') === 0 && getRequestProtocol() === 'https') {
+            $savedUrl = 'https://' . substr($savedUrl, 7);
+        }
+        return $savedUrl;
     }
-    return null;
+
+    return $imageUrl;
 }
 
 // BẮT LINK TỪ FRONTEND TRUYỀN XUỐNG
@@ -218,7 +249,7 @@ try {
                      VALUES (:name, :price, 1, :image, 'Sản phẩm đồng bộ từ Hoàng Hà PC', 'Hoàng Hà PC', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    $update_query = "UPDATE products SET specifications = :specs, price = :price WHERE id = :id";
+    $update_query = "UPDATE products SET specifications = :specs, price = :price, image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
 
     // BƯỚC 1: QUÉT LINK GỐC ĐỂ XEM LÀ DANH MỤC HAY SẢN PHẨM LẺ
@@ -282,15 +313,13 @@ try {
         }
         if ($price_val == 0) $price_val = null; // Để null nếu không có giá
 
-        // 3. Lấy Hình Ảnh (Tối ưu hóa theo nhiều nguồn: OG, Twitter, img src, srcset, data-src, background-image)
+        // 3. Lấy Hình Ảnh (giữ URL gốc để frontend riêng biệt có thể truy cập được)
         $image_url = $default_image;
+        $image_update = '';
         $found_image = findProductImageUrl($detail_xpath, $link);
         if (!empty($found_image)) {
-            $image_url = $found_image;
-            $downloaded = downloadRemoteImage($image_url, $image_save_dir);
-            if ($downloaded) {
-                $image_url = $downloaded;
-            }
+            $image_url = normalizeImageUrl($found_image);
+            $image_update = $image_url;
         }
 
         // 4. Lấy Cấu Hình (Template Matching nhưng giữ giá trị thực tế)
@@ -402,6 +431,7 @@ try {
         if ($existing_product) {
             $stmt_update->bindParam(":specs", $specs_json);
             $stmt_update->bindParam(":price", $price_val);
+            $stmt_update->bindParam(":image_update", $image_update);
             $stmt_update->bindParam(":id", $existing_product['id']);
             if ($stmt_update->execute()) $updatedCount++;
         } else {
