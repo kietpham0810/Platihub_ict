@@ -316,8 +316,8 @@ try {
                 continue;
             }
 
-            $value = '';
             $upperText = mb_strtoupper($text, 'UTF-8');
+            $value = '';
 
             if (strpos($text, ':') !== false) {
                 $parts = explode(':', $text, 2);
@@ -328,6 +328,21 @@ try {
                 $tds = $detail_xpath->query(".//td", $row);
                 if ($tds->length >= 2) {
                     $value = trim(strip_tags($tds->item(1)->nodeValue));
+                }
+            }
+
+            if ($value === '') {
+                $strong = $detail_xpath->query(".//strong|.//b", $row);
+                if ($strong->length > 0) {
+                    $label = trim(strip_tags($strong->item(0)->nodeValue));
+                    $value = trim(str_replace($label, '', $text));
+                }
+            }
+
+            if ($value === '') {
+                $value = trim(preg_replace('/^.*?(CPU|CHIP|MAIN|BO MẠCH|MOTHERBOARD|TẢN NHIỆT|TAN NHIET|COOL|AIO|FAN|WATER|LIQUID|RAM|MEMORY|DDR4|DDR5|DDR3|SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG|VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|NGUỒN|NGUON|PSU|POWER|WATT|WATTS|CASE|VỎ|VO|THÙNG|THUNG|CABINET)\s*[:\-–]?\s*/iu', '', $text));
+                if ($value === $text) {
+                    $value = '';
                 }
             }
 
