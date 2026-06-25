@@ -64,6 +64,160 @@ function resolveAbsoluteUrl($url, $baseUrl) {
     return "$scheme://$host$port" . rtrim($dir, '/') . '/' . ltrim($url, '/');
 }
 
+function fetchUrl($url, $headers = []) {
+    $ch = curl_init($url);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge([
+        "Accept: */*",
+        "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ], $headers));
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+    $result = curl_exec($ch);
+    curl_close($ch);
+    return $result;
+}
+
+function fetchJSON($url, $headers = []) {
+    $result = fetchUrl($url, $headers);
+    if ($result === false || $result === null) {
+        return null;
+    }
+    $json = json_decode($result, true);
+    return is_array($json) ? $json : null;
+}
+
+function parseHoangHaCategoryParams($html) {
+    $category = '';
+    $collection = '';
+    $show = 30;
+
+    if (preg_match('/show_more_product\(\s*["\']([^"\']+)["\']\s*,\s*["\']([^"\']*)["\']\s*\)/i', $html, $matches)) {
+        $category = trim($matches[1]);
+        $collection = trim($matches[2]);
+    }
+
+    if (preg_match('/Module\s*=\s*\{[^}]*\bid\s*:\s*["\']([^"\']+)["\']/i', $html, $matches) && $category === '') {
+        $category = trim($matches[1]);
+    }
+
+    if (preg_match('/category\s*=\s*["\']?(\d+)["\']?/i', $html, $matches) && $category === '') {
+        $category = trim($matches[1]);
+    }
+
+    if (preg_match('/const\s+product_per_page\s*=\s*(\d+)/i', $html, $matches)) {
+        $show = intval($matches[1]);
+        if ($show <= 0) {
+            $show = 30;
+        }
+    }
+
+    return [
+        'category' => $category,
+        'collection' => $collection,
+        'show' => $show
+    ];
+}
+
+function buildHoangHaCategoryApiUrl($baseUrl, $category, $collection, $show, $page) {
+    $baseParts = parse_url($baseUrl);
+    if (empty($baseParts['scheme']) || empty($baseParts['host'])) {
+        return '';
+    }
+
+    $baseHost = $baseParts['scheme'] . '://' . $baseParts['host'];
+    return $baseHost . '/ajax/get_json.php?action=product&action_type=product-list&hotType=&category=' . urlencode($category) . '&collection=' . urlencode($collection) . '&sort=order&show=' . intval($show) . '&page=' . intval($page);
+}
+
+function fetchHoangHaCategoryProductLinks($targetUrl, $html, $offset, $batchSize, &$totalLinks, &$apiImageMap) {
+    $apiImageMap = [];
+    $params = parseHoangHaCategoryParams($html);
+    if (empty($params['category'])) {
+        return [];
+    }
+
+    $perPage = max(5, intval($params['show']));
+    $startPage = intdiv($offset, $perPage) + 1;
+    $pageOffset = $offset % $perPage;
+    $currentPage = $startPage;
+    $required = $batchSize;
+    $links = [];
+    $totalLinks = 0;
+
+    while ($required > 0) {
+        $apiUrl = buildHoangHaCategoryApiUrl($targetUrl, $params['category'], $params['collection'], $perPage, $currentPage);
+        if (empty($apiUrl)) {
+            break;
+        }
+
+        $json = fetchJSON($apiUrl, [
+            'Accept: application/json, text/javascript, */*; q=0.01',
+            'X-Requested-With: XMLHttpRequest',
+            'Referer: ' . $targetUrl,
+            'Authorization: Basic ssaaAS76DAs6faFFghs1'
+        ]);
+
+        if (!is_array($json) || empty($json['list']) || !is_array($json['list'])) {
+            break;
+        }
+
+        if ($totalLinks === 0 && isset($json['total'])) {
+            $totalLinks = intval($json['total']);
+        }
+
+        $items = $json['list'];
+        if ($currentPage === $startPage && $pageOffset > 0) {
+            $items = array_slice($items, $pageOffset);
+        }
+
+        foreach ($items as $item) {
+            if ($required <= 0) {
+                break;
+            }
+            $href = '';
+            if (!empty($item['productUrl'])) {
+                $href = trim($item['productUrl']);
+            } elseif (!empty($item['url'])) {
+                $href = trim($item['url']);
+            }
+
+            if ($href === '') {
+                continue;
+            }
+
+            $href = resolveAbsoluteUrl($href, $targetUrl);
+            $links[] = $href;
+            if (!empty($item['productImage']['large'])) {
+                $apiImageMap[$href] = normalizeImageUrl($item['productImage']['large']);
+            } elseif (!empty($item['productImage'])) {
+                $apiImageMap[$href] = normalizeImageUrl($item['productImage']);
+            }
+
+            $required--;
+        }
+
+        if ($required <= 0) {
+            break;
+        }
+
+        if (count($items) < ($perPage - ($currentPage === $startPage ? $pageOffset : 0))) {
+            break;
+        }
+
+        $currentPage++;
+        if ($totalLinks > 0) {
+            $maxPages = (int) ceil($totalLinks / $perPage);
+            if ($currentPage > $maxPages) {
+                break;
+            }
+        }
+    }
+
+    return array_unique($links);
+}
+
 function extractImageUrlFromNode($node, $baseUrl) {
     $attrs = ['content', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-srcset', 'srcset', 'src'];
     foreach ($attrs as $attr) {
@@ -263,33 +417,50 @@ try {
     $xpath = new DOMXPath($dom);
 
     $product_links = [];
+    $apiImageMap = [];
+    $total_links = 0;
+    $isApiCategoryPage = false;
 
-    // Tìm kiếm các khối sản phẩm (Đặc thù web Hoàng Hà PC thường dùng class p-item hoặc product-item)
-    $itemNodes = $xpath->query("//div[contains(@class, 'p-item')]//a[@href] | //div[contains(@class, 'product-item')]//a[@href] | //a[contains(@class, 'p-name')]");
-    
-    if ($itemNodes->length > 0) {
-        // CHẾ ĐỘ CÀO DANH MỤC: Gom toàn bộ link con
-        foreach ($itemNodes as $node) {
-            $href = $node->getAttribute('href');
-            if (!empty($href)) {
-                if (strpos($href, 'http') === false) {
-                    $href = rtrim("https://hoanghapc.vn", "/") . "/" . ltrim($href, "/");
-                }
-                $product_links[] = $href;
-            }
-        }
-        $product_links = array_unique($product_links);
+    // Nếu là trang danh mục Hoàng Hà PC, ưu tiên lấy danh sách sản phẩm qua API nội bộ
+    $apiLinks = fetchHoangHaCategoryProductLinks($target_url, $html, $offset, $batch_size, $total_links, $apiImageMap);
+    if (!empty($apiLinks)) {
+        $product_links = $apiLinks;
+        $isApiCategoryPage = true;
     } else {
-        // CHẾ ĐỘ CÀO SẢN PHẨM LẺ
-        $product_links[] = $target_url;
+        // Fallback: tìm kiếm các khối sản phẩm trong HTML tĩnh
+        $itemNodes = $xpath->query("//div[contains(@class, 'p-item')]//a[@href] | //div[contains(@class, 'product-item')]//a[@href] | //a[contains(@class, 'p-name')]");
+        if ($itemNodes->length > 0) {
+            foreach ($itemNodes as $node) {
+                $href = $node->getAttribute('href');
+                if (!empty($href)) {
+                    if (strpos($href, 'http') === false) {
+                        $href = rtrim("https://hoanghapc.vn", "/") . "/" . ltrim($href, "/");
+                    }
+                    $product_links[] = $href;
+                }
+            }
+            $product_links = array_unique($product_links);
+        } else {
+            // CHẾ ĐỘ CÀO SẢN PHẨM LẺ
+            $product_links[] = $target_url;
+            $total_links = 1;
+        }
     }
 
     if (empty($product_links)) {
         throw new Exception("Không tìm thấy sản phẩm nào trong link này để cào.");
     }
 
-    $total_links = count($product_links);
-    $current_batch = array_slice($product_links, $offset, $batch_size);
+    if ($total_links === 0) {
+        $total_links = count($product_links);
+    }
+
+    if ($isApiCategoryPage) {
+        $current_batch = $product_links;
+    } else {
+        $current_batch = array_slice($product_links, $offset, $batch_size);
+    }
+
     if (empty($current_batch)) {
         throw new Exception("Không còn sản phẩm để cào tại vị trí offset này.");
     }
