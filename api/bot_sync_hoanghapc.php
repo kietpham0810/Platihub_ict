@@ -285,6 +285,79 @@ function findProductImageUrl($xpath, $baseUrl) {
     return '';
 }
 
+function normalizeTextValue($text) {
+    $value = trim(preg_replace('/\s+/u', ' ', $text));
+    return $value;
+}
+
+function parseProductSpecifications($xpath) {
+    $specs = [];
+    $rowQueries = [
+        "//div[contains(@class, 'pd-spec-group')]//table//tr",
+        "//div[contains(@class, 'pd-spec-group')]//li",
+        "//table[contains(@class, 'product-specs')]//tr",
+        "//div[contains(@class, 'specifications')]//li",
+        "//div[contains(@class, 'specification')]//tr",
+        "//div[contains(@class, 'specs')]//tr",
+        "//table//tr"
+    ];
+
+    $rows = [];
+    foreach ($rowQueries as $query) {
+        $nodes = $xpath->query($query);
+        if ($nodes->length > 0) {
+            foreach ($nodes as $node) {
+                $rows[] = $node;
+            }
+        }
+    }
+
+    foreach ($rows as $row) {
+        if (!$row) {
+            continue;
+        }
+
+        $label = '';
+        $value = '';
+        $rowText = normalizeTextValue($row->textContent);
+        if ($rowText === '') {
+            continue;
+        }
+
+        $tds = $xpath->query('.//td', $row);
+        if ($tds->length >= 2) {
+            $label = normalizeTextValue($tds->item(0)->textContent);
+            $value = normalizeTextValue($tds->item(1)->textContent);
+        } elseif ($xpath->query('.//th', $row)->length > 0) {
+            $ths = $xpath->query('.//th', $row);
+            $label = normalizeTextValue($ths->item(0)->textContent);
+            $td = $xpath->query('.//td', $row);
+            if ($td->length > 0) {
+                $value = normalizeTextValue($td->item(0)->textContent);
+            } else {
+                $value = normalizeTextValue(str_replace($label, '', $rowText));
+            }
+        } elseif (strpos($rowText, ':') !== false) {
+            $parts = explode(':', $rowText, 2);
+            $label = normalizeTextValue($parts[0]);
+            $value = normalizeTextValue($parts[1]);
+        } elseif (preg_match('/^(.*?)(\s+[-–:]\s+)(.*)$/u', $rowText, $parts)) {
+            $label = normalizeTextValue($parts[1]);
+            $value = normalizeTextValue($parts[3]);
+        }
+
+        if ($label === '' || $value === '') {
+            continue;
+        }
+
+        if (!isset($specs[$label]) || $specs[$label] === '') {
+            $specs[$label] = $value;
+        }
+    }
+
+    return $specs;
+}
+
 function getRequestProtocol() {
     if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
         return strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https' ? 'https' : 'http';
@@ -391,9 +464,10 @@ try {
     $db = $database->getConnection();
     
     $insertedCount = 0;
-    $updatedCount = 0; 
+    $updatedCount = 0;
+    $processedCount = 0;
     $skippedCount = 0;
-    $default_image = "https://via.placeholder.com/400x300?text=Hoang+Ha+PC"; 
+    $default_image = "https://via.placeholder.com/400x300?text=Hoang+Ha+PC";
     $image_save_dir = realpath(__DIR__ . '/../images/hoanghapc') ?: (__DIR__ . '/../images/hoanghapc');
 
     // CHUẨN BỊ VŨ KHÍ SQL
@@ -470,7 +544,10 @@ try {
         usleep(300000); // Ngủ 0.3s để tránh bị block IP
         
         $detail_html = fetchHTML($link);
-        if (!$detail_html) continue;
+        if (!$detail_html) {
+            $skippedCount++;
+            continue;
+        }
 
         $detail_dom = new DOMDocument();
         @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
@@ -478,7 +555,10 @@ try {
 
         // 1. Lấy Tên PC (Thường nằm trong thẻ h1)
         $nameNode = $detail_xpath->query("//h1");
-        if ($nameNode->length === 0) continue;
+        if ($nameNode->length === 0) {
+            $skippedCount++;
+            continue;
+        }
         $product_name = trim($nameNode->item(0)->nodeValue);
 
         // 2. Lấy Giá (Tìm thẻ chứa chữ 'giá' hoặc class price)
@@ -497,107 +577,13 @@ try {
         if (!empty($found_image)) {
             $image_url = normalizeImageUrl($found_image);
             $image_update = $image_url;
+        } elseif (!empty($apiImageMap[$link])) {
+            $image_url = normalizeImageUrl($apiImageMap[$link]);
+            $image_update = $image_url;
         }
 
-        // 4. Lấy Cấu Hình (Template Matching nhưng giữ giá trị thực tế)
-        $template_specs = [
-            'CPU' => '',
-            'MAIN' => '',
-            'TẢN NHIỆT' => '',
-            'RAM' => '',
-            'SSD' => '',
-            'VGA' => '',
-            'PSU' => '',
-            'CASE' => ''
-        ];
-
-        $specs = [];
-        $rows = $detail_xpath->query("//table//tr | //div[contains(@class, 'specifications')]//li");
-        foreach ($rows as $row) {
-            if (!$row) {
-                continue;
-            }
-
-            $rowText = trim(strip_tags($row->nodeValue));
-            if ($rowText === '') {
-                continue;
-            }
-
-            $label = '';
-            $value = '';
-
-            $tds = $detail_xpath->query(".//td", $row);
-            if ($tds->length >= 2) {
-                $label = trim(strip_tags($tds->item(0)->nodeValue));
-                $value = trim(strip_tags($tds->item(1)->nodeValue));
-            } else {
-                $ths = $detail_xpath->query(".//th", $row);
-                if ($ths->length > 0) {
-                    $label = trim(strip_tags($ths->item(0)->nodeValue));
-                    $value = trim(strip_tags($row->nodeValue));
-                    $value = trim(str_replace($label, '', $value));
-                }
-            }
-
-            if ($label === '' && strpos($rowText, ':') !== false) {
-                $parts = explode(':', $rowText, 2);
-                $label = trim($parts[0]);
-                $value = trim($parts[1]);
-            }
-
-            if ($value === '') {
-                $strongNode = $detail_xpath->query(".//strong|.//b", $row);
-                if ($strongNode->length > 0) {
-                    $label = trim(strip_tags($strongNode->item(0)->nodeValue));
-                    $value = trim(str_replace($label, '', $rowText));
-                }
-            }
-
-            if ($label === '' && $value === '') {
-                continue;
-            }
-
-            if ($value === '') {
-                $value = trim(preg_replace('/^.*?(CPU|CHIP|MAIN|BO MẠCH|MOTHERBOARD|TẢN NHIỆT|TAN NHIỆT|COOL|AIO|FAN|WATER|LIQUID|RAM|MEMORY|DDR4|DDR5|DDR3|SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG|VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|NGUỒN|NGUON|PSU|POWER|WATT|WATTS|CASE|VỎ|VO|THÙNG|THUNG|CABINET)\s*[:\-–]?\s*/iu', '', $rowText));
-                if ($value === $rowText) {
-                    $value = '';
-                }
-            }
-
-            if ($value === '') {
-                continue;
-            }
-
-            if ($label === '') {
-                $label = $rowText;
-            }
-
-            $upperLabel = mb_strtoupper($label, 'UTF-8');
-            $mappedKey = '';
-            if (preg_match('/\b(CPU|CHIP|I3|I5|I7|I9|RYZEN|INTEL|AMD)\b/i', $upperLabel)) {
-                $mappedKey = 'CPU';
-            } elseif (preg_match('/\b(MAIN|BO MẠCH|MOTHERBOARD|Z790|B760|H610|B650|X670|Z690|B550|X570)\b/i', $upperLabel)) {
-                $mappedKey = 'MAIN';
-            } elseif (preg_match('/\b(TẢN NHIỆT|TAN NHIỆT|COOL|AIO|FAN|WATER|LIQUID)\b/i', $upperLabel)) {
-                $mappedKey = 'TẢN NHIỆT';
-            } elseif (preg_match('/\b(RAM|MEMORY|DDR4|DDR5|DDR3|LPDDR5X|LPDDR4X|LPDDR4)\b/i', $upperLabel)) {
-                $mappedKey = 'RAM';
-            } elseif (preg_match('/\b(SSD|HDD|NVME|LƯU TRỮ|LUU TRU|STORAGE|Ổ CỨNG)\b/i', $upperLabel)) {
-                $mappedKey = 'SSD';
-            } elseif (preg_match('/\b(VGA|CARD|ĐỒ HỌA|DO HOA|RTX|GTX|RX|RADEON|GRAPHICS|GPU)\b/i', $upperLabel)) {
-                $mappedKey = 'VGA';
-            } elseif (preg_match('/\b(NGUỒN|NGUON|PSU|POWER|WATT|WATTS|ADAPTER)\b/i', $upperLabel)) {
-                $mappedKey = 'PSU';
-            } elseif (preg_match('/\b(CASE|VỎ|VO|THÙNG|THUNG|CABINET)\b/i', $upperLabel)) {
-                $mappedKey = 'CASE';
-            }
-
-            $finalKey = $mappedKey !== '' ? $mappedKey : $label;
-            if (!isset($specs[$finalKey]) || $specs[$finalKey] === '') {
-                $specs[$finalKey] = $value;
-            }
-        }
-
+        // 4. Lấy Cấu Hình (sử dụng parser chung để thu thập đủ cột spec)
+        $specs = parseProductSpecifications($detail_xpath);
         $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
         // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
@@ -610,28 +596,44 @@ try {
             $stmt_update->bindParam(":price", $price_val);
             $stmt_update->bindParam(":image_update", $image_update);
             $stmt_update->bindParam(":id", $existing_product['id']);
-            if ($stmt_update->execute()) $updatedCount++;
+            if ($stmt_update->execute()) {
+                $updatedCount++;
+                $processedCount++;
+            }
         } else {
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":price", $price_val);
             $stmt_insert->bindParam(":image", $image_url);
             $stmt_insert->bindParam(":specs", $specs_json);
-            if ($stmt_insert->execute()) $insertedCount++;
+            if ($stmt_insert->execute()) {
+                $insertedCount++;
+                $processedCount++;
+            }
         }
+    }
+
+    $message = "Đã cào thành công {$processedCount} sản phẩm.";
+    $has_more = ($offset + count($current_batch)) < $total_links;
+    if ($has_more) {
+        $message = "Đã cào thành công {$processedCount} sản phẩm, Bot phát hiện còn sản phẩm chưa cào, bạn muốn tiếp tục lấy thêm 5 sản phẩm không?";
     }
 
     echo json_encode([
         "status" => "success",
-        "message" => "Nhiệm vụ cào theo chỉ định đã hoàn tất.",
+        "message" => $message,
         "data" => [
             "target_scanned" => $target_url,
             "total_links_found" => $total_links,
             "total_links" => $total_links,
             "batch_count" => count($current_batch),
-            "next_offset" => $offset + count($current_batch),
-            "has_more" => ($offset + count($current_batch)) < $total_links,
+            "processed_count" => $processedCount,
             "new_inserted" => $insertedCount,
-            "updated_specifications" => $updatedCount
+            "updated_specifications" => $updatedCount,
+            "skipped" => $skippedCount,
+            "next_offset" => $offset + count($current_batch),
+            "has_more" => $has_more,
+            "continue_prompt" => $has_more ? "Đã cào thành công {$processedCount} sản phẩm, Bot phát hiện còn sản phẩm chưa cào, bạn muốn tiếp tục lấy thêm 5 sản phẩm không?" : "Đã cào hết danh sách sản phẩm.",
+            "continue_label" => $has_more ? "Tiếp tục cào 5 sản phẩm" : "Hoàn tất"
         ]
     ]);
 
