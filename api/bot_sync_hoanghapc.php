@@ -224,6 +224,8 @@ function downloadRemoteImage($imageUrl, $saveDir) {
 
 // BẮT LINK TỪ FRONTEND TRUYỀN XUỐNG
 $target_url = isset($_GET['url']) ? trim($_GET['url']) : '';
+$offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
+$batch_size = 5;
 
 if (empty($target_url)) {
     echo json_encode(["status" => "error", "message" => "Vui lòng dán đường link Hoàng Hà PC cần cào dữ liệu!"]);
@@ -277,8 +279,6 @@ try {
             }
         }
         $product_links = array_unique($product_links);
-        // Cắt giảm tối đa 20 link 1 lần cào để chống sập server Render
-        $product_links = array_slice($product_links, 0, 20); 
     } else {
         // CHẾ ĐỘ CÀO SẢN PHẨM LẺ
         $product_links[] = $target_url;
@@ -288,8 +288,14 @@ try {
         throw new Exception("Không tìm thấy sản phẩm nào trong link này để cào.");
     }
 
+    $total_links = count($product_links);
+    $current_batch = array_slice($product_links, $offset, $batch_size);
+    if (empty($current_batch)) {
+        throw new Exception("Không còn sản phẩm để cào tại vị trí offset này.");
+    }
+
     // BƯỚC 2: TIẾN HÀNH THÂM NHẬP VÀ BÓC TÁCH TỪNG SẢN PHẨM
-    foreach ($product_links as $link) {
+    foreach ($current_batch as $link) {
         usleep(300000); // Ngủ 0.3s để tránh bị block IP
         
         $detail_html = fetchHTML($link);
@@ -448,7 +454,11 @@ try {
         "message" => "Nhiệm vụ cào theo chỉ định đã hoàn tất.",
         "data" => [
             "target_scanned" => $target_url,
-            "total_links_found" => count($product_links),
+            "total_links_found" => $total_links,
+            "total_links" => $total_links,
+            "batch_count" => count($current_batch),
+            "next_offset" => $offset + count($current_batch),
+            "has_more" => ($offset + count($current_batch)) < $total_links,
             "new_inserted" => $insertedCount,
             "updated_specifications" => $updatedCount
         ]
