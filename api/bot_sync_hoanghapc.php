@@ -554,6 +554,122 @@ function downloadRemoteImage($imageUrl, $saveDir) {
     return $imageUrl;
 }
 
+// Client-ID Imgur (dùng chung với form đăng tay ở FE) để lưu ảnh sạch,
+// không phụ thuộc ổ đĩa của Render (file local bị xóa mỗi lần deploy).
+if (!defined('IMGUR_CLIENT_ID')) {
+    define('IMGUR_CLIENT_ID', '139e72807f61c3c');
+}
+
+// Tải nội dung ảnh gốc về dạng binary.
+function fetchImageData($imageUrl) {
+    $imageUrl = trim($imageUrl);
+    if (empty($imageUrl) || stripos($imageUrl, 'data:image') === 0) {
+        return null;
+    }
+
+    $ch = curl_init($imageUrl);
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, [
+        "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
+
+    $data = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($data === false || $httpCode !== 200 || strlen($data) < 100) {
+        return null;
+    }
+    return $data;
+}
+
+// Xóa watermark "Hoàng Hà PC" nằm ở dải sát đáy ảnh bằng cách che bằng nền trắng
+// (ảnh sản phẩm Hoàng Hà PC luôn nền trắng). Trả về binary JPEG đã xử lý,
+// hoặc null nếu môi trường thiếu GD / ảnh không đọc được.
+function removeImageWatermark($imageData) {
+    if (empty($imageData) || !function_exists('imagecreatefromstring')) {
+        return null;
+    }
+
+    $img = @imagecreatefromstring($imageData);
+    if ($img === false) {
+        return null;
+    }
+
+    $w = imagesx($img);
+    $h = imagesy($img);
+    // Dải watermark sát đáy, chiếm ~12% chiều cao và toàn bộ chiều ngang.
+    $stripH = (int) round($h * 0.12);
+    if ($w < 1 || $stripH < 1) {
+        imagedestroy($img);
+        return null;
+    }
+
+    $white = imagecolorallocate($img, 255, 255, 255);
+    imagefilledrectangle($img, 0, $h - $stripH, $w, $h, $white);
+
+    ob_start();
+    imagejpeg($img, null, 90);
+    $out = ob_get_clean();
+    imagedestroy($img);
+
+    return ($out !== false && $out !== '') ? $out : null;
+}
+
+// Up ảnh (binary) lên Imgur, trả về link ảnh trực tiếp hoặc null nếu lỗi.
+function uploadImageToImgur($imageData, $clientId) {
+    if (empty($imageData) || empty($clientId)) {
+        return null;
+    }
+
+    $ch = curl_init('https://api.imgur.com/3/image');
+    curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
+    curl_setopt($ch, CURLOPT_POST, true);
+    curl_setopt($ch, CURLOPT_HTTPHEADER, ["Authorization: Client-ID " . $clientId]);
+    curl_setopt($ch, CURLOPT_POSTFIELDS, [
+        "image" => base64_encode($imageData),
+        "type" => "base64"
+    ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 40);
+
+    $resp = curl_exec($ch);
+    $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    curl_close($ch);
+
+    if ($resp === false || $httpCode !== 200) {
+        return null;
+    }
+
+    $json = json_decode($resp, true);
+    if (!empty($json['success']) && !empty($json['data']['link'])) {
+        return normalizeImageUrl($json['data']['link']);
+    }
+    return null;
+}
+
+// Tải ảnh gốc -> xóa watermark -> up lên Imgur. Trả về link Imgur sạch,
+// hoặc '' nếu không xử lý được (caller sẽ giữ ảnh gốc làm fallback).
+function buildCleanImageUrl($imageUrl) {
+    $raw = fetchImageData($imageUrl);
+    if ($raw === null) {
+        return '';
+    }
+
+    $cleaned = removeImageWatermark($raw);
+    if ($cleaned === null) {
+        // Thiếu GD hoặc ảnh lỗi: vẫn up ảnh gốc lên Imgur để không phụ thuộc nguồn ngoài.
+        $cleaned = $raw;
+    }
+
+    $link = uploadImageToImgur($cleaned, IMGUR_CLIENT_ID);
+    return $link !== null ? $link : '';
+}
+
 // BẮT LINK TỪ FRONTEND TRUYỀN XUỐNG
 $target_url = isset($_GET['url']) ? trim($_GET['url']) : '';
 $offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
@@ -576,7 +692,9 @@ try {
     $image_save_dir = realpath(__DIR__ . '/../images/hoanghapc') ?: (__DIR__ . '/../images/hoanghapc');
 
     // CHUẨN BỊ VŨ KHÍ SQL
-    $check_query = "SELECT id, specifications FROM products WHERE product_name = :name LIMIT 1";
+    // Khớp cả tên đã bỏ tiền tố HHPC (:name) lẫn tên gốc còn HHPC (:orig) để
+    // không tạo bản ghi trùng cho sản phẩm đã cào trước đây.
+    $check_query = "SELECT id, source, image_url FROM products WHERE product_name = :name OR product_name = :orig LIMIT 1";
     $stmt_check = $db->prepare($check_query);
 
     $insert_query = "INSERT INTO products 
@@ -584,7 +702,17 @@ try {
                      VALUES (:name, :price, 1, :image, '', '', :ptype, 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    $update_query = "UPDATE products SET specifications = :specs, price = :price, product_type = :ptype, manufacturer = '', description = '', image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
+    // Chỉ ẩn nguồn (xóa manufacturer/description) và đổi tên đã bỏ HHPC cho sản phẩm
+    // do bot tạo (source='bot'); KHÔNG đụng tới sản phẩm admin nhập/sửa tay.
+    $update_query = "UPDATE products SET 
+                        product_name = CASE WHEN source = 'bot' THEN :name ELSE product_name END,
+                        specifications = :specs, 
+                        price = :price, 
+                        product_type = :ptype, 
+                        manufacturer = CASE WHEN source = 'bot' THEN '' ELSE manufacturer END, 
+                        description = CASE WHEN source = 'bot' THEN '' ELSE description END, 
+                        image_url = COALESCE(NULLIF(:image_update, ''), image_url) 
+                     WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
 
     // BƯỚC 1: QUÉT LINK GỐC ĐỂ XEM LÀ DANH MỤC HAY SẢN PHẨM LẺ
@@ -664,12 +792,15 @@ try {
             $skippedCount++;
             continue;
         }
-        $product_name = trim($nameNode->item(0)->nodeValue);
+        $original_name = trim($nameNode->item(0)->nodeValue);
 
         // Bỏ tiền tố "HHPC" ở đầu tên sản phẩm (nếu có) để ẩn nguồn dữ liệu
         // Ví dụ: "HHPC PC Intel Core i9..." -> "PC Intel Core i9..."
-        $product_name = preg_replace('/^\s*HHPC\b[\s\-:]*/iu', '', $product_name);
-        $product_name = trim($product_name);
+        // Giữ $original_name để còn khớp được bản ghi cũ (đã lưu tên còn HHPC).
+        $product_name = trim(preg_replace('/^\s*HHPC\b[\s\-:]*/iu', '', $original_name));
+        if ($product_name === '') {
+            $product_name = $original_name;
+        }
 
         // 2. Lấy Giá (Tìm thẻ chứa chữ 'giá' hoặc class price)
         $priceNode = $detail_xpath->query("//span[contains(@class, 'p-price')] | //strong[contains(@class, 'price')] | //span[contains(@class, 'price-detail')]");
@@ -680,16 +811,13 @@ try {
         }
         if ($price_val == 0) $price_val = null; // Để null nếu không có giá
 
-        // 3. Lấy Hình Ảnh (giữ URL gốc để frontend riêng biệt có thể truy cập được)
-        $image_url = $default_image;
-        $image_update = '';
+        // 3. Lấy Hình Ảnh (URL gốc trên Hoàng Hà PC; sẽ được xóa watermark + up Imgur bên dưới)
+        $source_image = '';
         $found_image = findProductImageUrl($detail_xpath, $link);
         if (!empty($found_image)) {
-            $image_url = normalizeImageUrl($found_image);
-            $image_update = $image_url;
+            $source_image = normalizeImageUrl($found_image);
         } elseif (!empty($apiImageMap[$link])) {
-            $image_url = normalizeImageUrl($apiImageMap[$link]);
-            $image_update = $image_url;
+            $source_image = normalizeImageUrl($apiImageMap[$link]);
         }
 
         // 4. Lấy Cấu Hình (sử dụng parser chung để thu thập đủ cột spec)
@@ -701,10 +829,19 @@ try {
 
         // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
         $stmt_check->bindParam(":name", $product_name);
+        $stmt_check->bindParam(":orig", $original_name);
         $stmt_check->execute();
         $existing_product = $stmt_check->fetch(PDO::FETCH_ASSOC);
 
         if ($existing_product) {
+            // Chỉ tải/xử lý ảnh khi ảnh hiện tại CHƯA phải Imgur (tránh up lại mỗi lần cào).
+            $image_update = '';
+            $existing_image = $existing_product['image_url'] ?? '';
+            if (!empty($source_image) && stripos($existing_image, 'imgur.com') === false) {
+                $image_update = buildCleanImageUrl($source_image);
+            }
+
+            $stmt_update->bindParam(":name", $product_name);
             $stmt_update->bindParam(":specs", $specs_json);
             $stmt_update->bindParam(":price", $price_val);
             $stmt_update->bindParam(":ptype", $product_type);
@@ -715,6 +852,13 @@ try {
                 $processedCount++;
             }
         } else {
+            // Sản phẩm mới: xóa watermark + up Imgur; nếu thất bại thì giữ ảnh gốc.
+            $image_url = $default_image;
+            if (!empty($source_image)) {
+                $clean_image = buildCleanImageUrl($source_image);
+                $image_url = $clean_image !== '' ? $clean_image : $source_image;
+            }
+
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":price", $price_val);
             $stmt_insert->bindParam(":image", $image_url);
