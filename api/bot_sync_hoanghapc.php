@@ -581,10 +581,10 @@ try {
 
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
-                     VALUES (:name, :price, 1, :image, 'Sản phẩm đồng bộ từ Hoàng Hà PC', 'Hoàng Hà PC', :ptype, 'pending', 'bot', :specs)";
+                     VALUES (:name, :price, 1, :image, '', '', :ptype, 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    $update_query = "UPDATE products SET specifications = :specs, price = :price, product_type = :ptype, image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
+    $update_query = "UPDATE products SET specifications = :specs, price = :price, product_type = :ptype, manufacturer = '', description = '', image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
 
     // BƯỚC 1: QUÉT LINK GỐC ĐỂ XEM LÀ DANH MỤC HAY SẢN PHẨM LẺ
@@ -665,6 +665,11 @@ try {
             continue;
         }
         $product_name = trim($nameNode->item(0)->nodeValue);
+
+        // Bỏ tiền tố "HHPC" ở đầu tên sản phẩm (nếu có) để ẩn nguồn dữ liệu
+        // Ví dụ: "HHPC PC Intel Core i9..." -> "PC Intel Core i9..."
+        $product_name = preg_replace('/^\s*HHPC\b[\s\-:]*/iu', '', $product_name);
+        $product_name = trim($product_name);
 
         // 2. Lấy Giá (Tìm thẻ chứa chữ 'giá' hoặc class price)
         $priceNode = $detail_xpath->query("//span[contains(@class, 'p-price')] | //strong[contains(@class, 'price')] | //span[contains(@class, 'price-detail')]");

@@ -23,7 +23,6 @@ if (json_last_error() !== JSON_ERROR_NONE) {
 if (
     !empty($data->product_name) &&
     !empty($data->image_url) &&
-    !empty($data->manufacturer) &&
     !empty($data->product_type)
 ) {
     // Thêm cột specifications vào Query
@@ -34,6 +33,7 @@ if (
 
     // Xử lý dữ liệu sạch
     $desc = !empty($data->description) ? htmlspecialchars(strip_tags($data->description)) : "";
+    $manufacturer = !empty($data->manufacturer) ? $data->manufacturer : "";
     
     // XỬ LÝ SPECIFICATIONS: Chuyển Object thành chuỗi JSON (Giữ nguyên Unicode tiếng Việt)
     $specs_json = NULL;
@@ -44,7 +44,7 @@ if (
     $stmt->bindParam(":name", $data->product_name);
     $stmt->bindParam(":image", $data->image_url);
     $stmt->bindParam(":desc", $desc);
-    $stmt->bindParam(":manufacturer", $data->manufacturer);
+    $stmt->bindParam(":manufacturer", $manufacturer);
     $stmt->bindParam(":type", $data->product_type);
     $stmt->bindParam(":specs", $specs_json);
 
