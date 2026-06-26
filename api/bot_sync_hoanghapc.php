@@ -312,6 +312,68 @@ function removeVietnameseTones($str) {
     return str_replace($map, $repl, $str);
 }
 
+// Phân loại sản phẩm vào đúng danh mục FE (PC, Laptop, CPU, Mainboard, VGA,
+// Linh kiện, Màn hình, HDD-SSD, Tản Nhiệt) dựa trên link danh mục đang cào và
+// tên sản phẩm. Trả về giá trị product_type khớp với bộ lọc ở frontend.
+function classifyHoangHaProductType($productName, $targetUrl) {
+    $urlKey = removeVietnameseTones((string) $targetUrl);
+    $nameKey = ' ' . removeVietnameseTones((string) $productName) . ' ';
+
+    // Ưu tiên slug của link danh mục (người dùng cào theo từng danh mục)
+    if (strpos($urlKey, 'laptop') !== false || strpos($urlKey, 'macbook') !== false) {
+        return 'Laptop';
+    }
+    if (strpos($urlKey, 'vga') !== false || strpos($urlKey, 'card-man-hinh') !== false || strpos($urlKey, 'card-do-hoa') !== false) {
+        return 'VGA';
+    }
+    if (strpos($urlKey, 'man-hinh') !== false || strpos($urlKey, 'manhinh') !== false || strpos($urlKey, 'monitor') !== false) {
+        return 'Màn hình';
+    }
+    if (strpos($urlKey, 'tan-nhiet') !== false || strpos($urlKey, 'tannhiet') !== false || strpos($urlKey, 'cooling') !== false) {
+        return 'Tản Nhiệt';
+    }
+    if (strpos($urlKey, 'o-cung') !== false || strpos($urlKey, 'ocung') !== false || strpos($urlKey, 'ssd') !== false || strpos($urlKey, 'hdd') !== false) {
+        return 'HDD-SSD';
+    }
+    if (strpos($urlKey, 'main') !== false || strpos($urlKey, 'bo-mach-chu') !== false || strpos($urlKey, 'mainboard') !== false) {
+        return 'Mainboard';
+    }
+    if (strpos($urlKey, 'cpu') !== false || strpos($urlKey, 'vi-xu-ly') !== false || strpos($urlKey, 'bo-vi-xu-ly') !== false) {
+        return 'CPU';
+    }
+    if (strpos($urlKey, '/pc') !== false || strpos($urlKey, 'pc-') !== false || strpos($urlKey, 'may-tinh-de-ban') !== false || strpos($urlKey, 'may-bo') !== false) {
+        return 'PC';
+    }
+
+    // Fallback theo tên sản phẩm khi slug không rõ ràng
+    if (strpos($nameKey, ' laptop ') !== false || strpos($nameKey, ' macbook ') !== false) {
+        return 'Laptop';
+    }
+    if (strpos($nameKey, ' pc ') !== false || strpos($nameKey, ' may bo ') !== false) {
+        return 'PC';
+    }
+    if (strpos($nameKey, ' vga ') !== false || strpos($nameKey, ' card man hinh ') !== false || strpos($nameKey, ' card do hoa ') !== false) {
+        return 'VGA';
+    }
+    if (strpos($nameKey, ' man hinh ') !== false || strpos($nameKey, ' monitor ') !== false) {
+        return 'Màn hình';
+    }
+    if (strpos($nameKey, ' tan nhiet ') !== false) {
+        return 'Tản Nhiệt';
+    }
+    if (strpos($nameKey, ' ssd ') !== false || strpos($nameKey, ' hdd ') !== false || strpos($nameKey, ' o cung ') !== false) {
+        return 'HDD-SSD';
+    }
+    if (strpos($nameKey, ' mainboard ') !== false || strpos($nameKey, ' bo mach chu ') !== false || strpos($nameKey, ' main ') !== false) {
+        return 'Mainboard';
+    }
+    if (strpos($nameKey, ' cpu ') !== false || strpos($nameKey, ' vi xu ly ') !== false) {
+        return 'CPU';
+    }
+
+    return 'Linh kiện';
+}
+
 function parseProductSpecifications($xpath) {
     $specs = [];
     $rowQueries = [
@@ -519,10 +581,10 @@ try {
 
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
-                     VALUES (:name, :price, 1, :image, 'Sản phẩm đồng bộ từ Hoàng Hà PC', 'Hoàng Hà PC', 'Thiết bị máy tính', 'pending', 'bot', :specs)";
+                     VALUES (:name, :price, 1, :image, 'Sản phẩm đồng bộ từ Hoàng Hà PC', 'Hoàng Hà PC', :ptype, 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
 
-    $update_query = "UPDATE products SET specifications = :specs, price = :price, image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
+    $update_query = "UPDATE products SET specifications = :specs, price = :price, product_type = :ptype, image_url = COALESCE(NULLIF(:image_update, ''), image_url) WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
 
     // BƯỚC 1: QUÉT LINK GỐC ĐỂ XEM LÀ DANH MỤC HAY SẢN PHẨM LẺ
@@ -629,6 +691,9 @@ try {
         $specs = parseProductSpecifications($detail_xpath);
         $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
 
+        // 5. Phân loại danh mục để FE lọc đúng (theo link danh mục + tên sản phẩm)
+        $product_type = classifyHoangHaProductType($product_name, $target_url);
+
         // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
         $stmt_check->bindParam(":name", $product_name);
         $stmt_check->execute();
@@ -637,6 +702,7 @@ try {
         if ($existing_product) {
             $stmt_update->bindParam(":specs", $specs_json);
             $stmt_update->bindParam(":price", $price_val);
+            $stmt_update->bindParam(":ptype", $product_type);
             $stmt_update->bindParam(":image_update", $image_update);
             $stmt_update->bindParam(":id", $existing_product['id']);
             if ($stmt_update->execute()) {
@@ -647,6 +713,7 @@ try {
             $stmt_insert->bindParam(":name", $product_name);
             $stmt_insert->bindParam(":price", $price_val);
             $stmt_insert->bindParam(":image", $image_url);
+            $stmt_insert->bindParam(":ptype", $product_type);
             $stmt_insert->bindParam(":specs", $specs_json);
             if ($stmt_insert->execute()) {
                 $insertedCount++;
