@@ -312,6 +312,13 @@ function parseProductSpecifications($xpath) {
         }
     }
 
+    // Nhãn của dòng tiêu đề bảng "cấu hình build" (STT | Mã hàng | Tên hàng | Bảo hành)
+    // -> cần bỏ qua, không lưu thành thông số.
+    $headerLabels = [
+        'stt', 'ma hang', 'ten hang', 'thoi han bao hanh', 'bao hanh',
+        'don gia', 'thanh tien', 'so luong', 'don vi', 'ghi chu'
+    ];
+
     foreach ($rows as $row) {
         if (!$row) {
             continue;
@@ -324,19 +331,25 @@ function parseProductSpecifications($xpath) {
             continue;
         }
 
-        $tds = $xpath->query('.//td', $row);
-        if ($tds->length >= 2) {
-            $label = normalizeTextValue($tds->item(0)->textContent);
-            $value = normalizeTextValue($tds->item(1)->textContent);
-        } elseif ($xpath->query('.//th', $row)->length > 0) {
-            $ths = $xpath->query('.//th', $row);
-            $label = normalizeTextValue($ths->item(0)->textContent);
-            $td = $xpath->query('.//td', $row);
-            if ($td->length > 0) {
-                $value = normalizeTextValue($td->item(0)->textContent);
-            } else {
-                $value = normalizeTextValue(str_replace($label, '', $rowText));
-            }
+        // Lấy toàn bộ ô (th + td) theo đúng thứ tự xuất hiện để xử lý được cả
+        // bảng 2 cột (Nhãn | Giá trị) lẫn bảng build nhiều cột (STT | Loại | Tên).
+        $cellNodes = $xpath->query('.//th|.//td', $row);
+        $cells = [];
+        foreach ($cellNodes as $cell) {
+            $cells[] = normalizeTextValue($cell->textContent);
+        }
+        $cellCount = count($cells);
+
+        if ($cellCount >= 3 && preg_match('/^\d+$/', $cells[0])) {
+            // Bảng cấu hình build: cột 0 = STT, cột 1 = loại linh kiện, cột 2 = tên linh kiện
+            $label = $cells[1];
+            $value = $cells[2];
+        } elseif ($cellCount >= 2) {
+            $label = $cells[0];
+            $value = $cells[1];
+        } elseif ($cellCount === 1 && strpos($rowText, ':') === false) {
+            // Ô đơn không có dấu ':' -> không đủ dữ liệu, bỏ qua
+            continue;
         } elseif (strpos($rowText, ':') !== false) {
             $parts = explode(':', $rowText, 2);
             $label = normalizeTextValue($parts[0]);
@@ -347,6 +360,19 @@ function parseProductSpecifications($xpath) {
         }
 
         if ($label === '' || $value === '') {
+            continue;
+        }
+
+        // Bỏ qua dòng tiêu đề của bảng cấu hình build
+        $labelKey = strtolower($label);
+        if (function_exists('iconv')) {
+            $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT', $labelKey);
+            if ($ascii !== false) {
+                $labelKey = strtolower($ascii);
+            }
+        }
+        $labelKey = trim(preg_replace('/[^a-z0-9 ]+/', '', $labelKey));
+        if (in_array($labelKey, $headerLabels, true)) {
             continue;
         }
 
