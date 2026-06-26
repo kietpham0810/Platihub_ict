@@ -290,6 +290,28 @@ function normalizeTextValue($text) {
     return $value;
 }
 
+// Bỏ dấu tiếng Việt một cách xác định (không phụ thuộc locale như iconv//TRANSLIT)
+function removeVietnameseTones($str) {
+    $map = [
+        'à','á','ạ','ả','ã','â','ầ','ấ','ậ','ẩ','ẫ','ă','ằ','ắ','ặ','ẳ','ẵ',
+        'è','é','ẹ','ẻ','ẽ','ê','ề','ế','ệ','ể','ễ',
+        'ì','í','ị','ỉ','ĩ',
+        'ò','ó','ọ','ỏ','õ','ô','ồ','ố','ộ','ổ','ỗ','ơ','ờ','ớ','ợ','ở','ỡ',
+        'ù','ú','ụ','ủ','ũ','ư','ừ','ứ','ự','ử','ữ',
+        'ỳ','ý','ỵ','ỷ','ỹ','đ'
+    ];
+    $repl = [
+        'a','a','a','a','a','a','a','a','a','a','a','a','a','a','a','a','a',
+        'e','e','e','e','e','e','e','e','e','e','e',
+        'i','i','i','i','i',
+        'o','o','o','o','o','o','o','o','o','o','o','o','o','o','o','o','o',
+        'u','u','u','u','u','u','u','u','u','u','u',
+        'y','y','y','y','y','d'
+    ];
+    $str = mb_strtolower($str, 'UTF-8');
+    return str_replace($map, $repl, $str);
+}
+
 function parseProductSpecifications($xpath) {
     $specs = [];
     $rowQueries = [
@@ -364,14 +386,9 @@ function parseProductSpecifications($xpath) {
         }
 
         // Bỏ qua dòng tiêu đề của bảng cấu hình build
-        $labelKey = strtolower($label);
-        if (function_exists('iconv')) {
-            $ascii = @iconv('UTF-8', 'ASCII//TRANSLIT', $labelKey);
-            if ($ascii !== false) {
-                $labelKey = strtolower($ascii);
-            }
-        }
-        $labelKey = trim(preg_replace('/[^a-z0-9 ]+/', '', $labelKey));
+        $labelKey = removeVietnameseTones($label);
+        $labelKey = trim(preg_replace('/[^a-z0-9 ]+/', ' ', $labelKey));
+        $labelKey = preg_replace('/\s+/', ' ', $labelKey);
         if (in_array($labelKey, $headerLabels, true)) {
             continue;
         }
