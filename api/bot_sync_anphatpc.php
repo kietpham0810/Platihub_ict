@@ -4,25 +4,41 @@ header("Access-Control-Allow-Origin: *");
 header("Content-Type: application/json; charset=UTF-8");
 header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
 header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
- 
+
 if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
     http_response_code(200);
     exit();
 }
- 
+
 // Chống timeout và giới hạn bộ nhớ khi cào dữ liệu nặng
 set_time_limit(0); 
 ini_set('memory_limit', '512M'); 
- 
+
 require_once '../config/database.php';
- 
+
+// ================= HỆ THỐNG GIÁM SÁT (LOGGING) =================
+function logBotAction($message) {
+    $logDir = __DIR__ . '/../logs';
+    if (!is_dir($logDir)) {
+        @mkdir($logDir, 0777, true);
+    }
+    $logFile = $logDir . '/anphat_bot.log';
+    
+    // Tự động dọn dẹp nếu file log vượt quá 5MB để chống tràn ổ đĩa
+    if (file_exists($logFile) && filesize($logFile) > 5 * 1024 * 1024) {
+        file_put_contents($logFile, ""); // Xóa trắng
+    }
+    
+    $timestamp = date('[Y-m-d H:i:s]');
+    file_put_contents($logFile, "$timestamp $message" . PHP_EOL, FILE_APPEND);
+}
+
 // HÀM LẤY HTML CHỐNG BLOCK
 function fetchHTML($url) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
-    // Giả mạo trình duyệt thật để An Phát PC không chặn
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
         "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
@@ -35,48 +51,35 @@ function fetchHTML($url) {
     curl_close($ch);
     return $html;
 }
- 
+
 function resolveAbsoluteUrl($url, $baseUrl) {
     $url = trim($url);
-    if (empty($url)) {
-        return '';
-    }
-    if (strpos($url, '//') === 0) {
-        return 'https:' . $url;
-    }
-    if (preg_match('#^https?://#i', $url)) {
-        return $url;
-    }
+    if (empty($url)) return '';
+    if (strpos($url, '//') === 0) return 'https:' . $url;
+    if (preg_match('#^https?://#i', $url)) return $url;
+    
     $baseParts = parse_url($baseUrl);
-    if (empty($baseParts['scheme']) || empty($baseParts['host'])) {
-        return $url;
-    }
+    if (empty($baseParts['scheme']) || empty($baseParts['host'])) return $url;
+    
     $scheme = $baseParts['scheme'];
     $host = $baseParts['host'];
     $port = isset($baseParts['port']) ? ':' . $baseParts['port'] : '';
- 
-    if (strpos($url, '/') === 0) {
-        return "$scheme://$host$port" . $url;
-    }
- 
+
+    if (strpos($url, '/') === 0) return "$scheme://$host$port" . $url;
+
     $path = isset($baseParts['path']) ? $baseParts['path'] : '/';
     $dir = preg_replace('#/[^/]*$#', '/', $path);
     return "$scheme://$host$port" . rtrim($dir, '/') . '/' . ltrim($url, '/');
 }
- 
+
 function extractImageUrlFromNode($node, $baseUrl) {
     $attrs = ['content', 'data-src', 'data-original', 'data-lazy-src', 'data-lazy', 'data-srcset', 'srcset', 'src'];
     foreach ($attrs as $attr) {
-        if (!$node->hasAttribute($attr)) {
-            continue;
-        }
+        if (!$node->hasAttribute($attr)) continue;
+        
         $value = trim($node->getAttribute($attr));
-        if ($value === '') {
-            continue;
-        }
-        if (stripos($value, 'data:image') === 0) {
-            continue;
-        }
+        if ($value === '' || stripos($value, 'data:image') === 0) continue;
+        
         if ($attr === 'srcset' || $attr === 'data-srcset') {
             $parts = preg_split('/\s*,\s*/', $value);
             foreach ($parts as $part) {
@@ -91,7 +94,7 @@ function extractImageUrlFromNode($node, $baseUrl) {
     }
     return '';
 }
- 
+
 function findProductImageUrl($xpath, $baseUrl) {
     $queries = [
         "//meta[@property='og:image']",
@@ -101,27 +104,25 @@ function findProductImageUrl($xpath, $baseUrl) {
         "//div[contains(@class, 'product-image')]//img",
         "//div[contains(@class, 'gallery')]//img",
         "//div[contains(@class, 'thumb')]//img",
-        "//div[contains(@class, 'fotorama')]//a", 
+        "//div[contains(@class, 'fotorama')]//a",
         "//figure//img",
         "//picture//img",
-        "//img[contains(@class, 'p-image') or contains(@class, 'product-image') or contains(@class, 'p-picture') or contains(@class, 'product-gallery') or contains(@class, 'p-thumb') or contains(@class, 'slider') or contains(@class, 'lazy') or contains(@class, 'thumbnail')]",
+        "//img[contains(@class, 'p-image') or contains(@class, 'product-image') or contains(@class, 'p-picture') or contains(@class, 'slider') or contains(@class, 'lazy')]",
         "//img"
     ];
- 
+
     foreach ($queries as $query) {
         $nodes = $xpath->query($query);
         foreach ($nodes as $node) {
             if ($node->tagName === 'a') {
-                $image = $node->getAttribute('href');
+                $image = resolveAbsoluteUrl($node->getAttribute('href'), $baseUrl);
             } else {
-                 $image = extractImageUrlFromNode($node, $baseUrl);
+                $image = extractImageUrlFromNode($node, $baseUrl);
             }
-            if (!empty($image)) {
-                return $image;
-            }
+            if (!empty($image)) return $image;
         }
     }
- 
+
     $styleNodes = $xpath->query("//*[contains(@style, 'background-image')]");
     foreach ($styleNodes as $node) {
         $style = $node->getAttribute('style');
@@ -132,15 +133,13 @@ function findProductImageUrl($xpath, $baseUrl) {
             }
         }
     }
- 
     return '';
 }
- 
-@function normalizeTextValue($text) {
-    $value = trim(preg_replace('/\s+/u', ' ', $text));
-    return $value;
+
+function normalizeTextValue($text) {
+    return trim(preg_replace('/\s+/u', ' ', $text));
 }
- 
+
 function removeVietnameseTones($str) {
     $map = [
         'à','á','ạ','ả','ã','â','ầ','ấ','ậ','ẩ','ẫ','ă','ằ','ắ','ặ','ẳ','ẵ',
@@ -161,65 +160,46 @@ function removeVietnameseTones($str) {
     $str = mb_strtolower($str, 'UTF-8');
     return str_replace($map, $repl, $str);
 }
- 
+
 function classifyAnPhatProductType($productName, $targetUrl) {
     $urlKey = removeVietnameseTones((string) $targetUrl);
     $nameKey = ' ' . removeVietnameseTones((string) $productName) . ' ';
-    if (strpos($urlKey, 'laptop') !== false || strpos($urlKey, 'macbook') !== false) {
-        return 'Laptop';
-    }
-    if (strpos($urlKey, 'vga') !== false || strpos($urlKey, 'card-man-hinh') !== false || strpos($urlKey, 'card-do-hoa') !== false) {
-        return 'VGA';
-    }
-    if (strpos($urlKey, 'man-hinh') !== false || strpos($urlKey, 'manhinh') !== false || strpos($urlKey, 'monitor') !== false) {
-        return 'Màn hình';
-    }
-    if (strpos($urlKey, 'tan-nhiet') !== false || strpos($urlKey, 'cooling') !== false) {
-        return 'Tản Nhiệt';
-    }
-    if (strpos($urlKey, 'o-cung') !== false || strpos($urlKey, 'ocung') !== false || strpos($urlKey, 'ssd') !== false || strpos($urlKey, 'hdd') !== false) {
-        return 'HDD-SSD';
-    }
-    if (strpos($urlKey, 'main') !== false || strpos($urlKey, 'bo-mach-chu') !== false || strpos($urlKey, 'mainboard') !== false) {
-        return 'Mainboard';
-    }
-    if (strpos($urlKey, 'cpu') !== false || strpos($urlKey, 'vi-xu-ly') !== false || strpos($urlKey, 'bo-vi-xu-ly') !== false) {
-        return 'CPU';
-    }
-    if (strpos($urlKey, '/pc') !== false || strpos($urlKey, 'may-tinh-') !== false || strpos($urlKey, 'may-bo') !== false) {
-        return 'PC';
-    }
-    // Fallback theo tên sản phẩm
-    if (strpos($nameKey, ' laptop ') !== false || strpos($nameKey, ' macbook ') !== false) {
-        return 'Laptop';
-    }
-    if (strpos($nameKey, ' pc ') !== false || strpos($nameKey, ' may bo ') !== false || strpos($nameKey, ' may tinh ') !== false) {
-        return 'PC';
-    }
-    if (strpos($nameKey, ' vga ') !== false || strpos($nameKey, ' card man hinh ') !== false || strpos($nameKey, ' card do hoa ') !== false) {
-        return 'VGA';
-    }
-    if (strpos($nameKey, ' man hinh ') !== false || strpos($nameKey, ' monitor ') !== false) {
-        return 'Màn hình';
-    }
-    if (strpos($nameKey, ' tan nhiet ') !== false) {
-        return 'Tản Nhiệt';
-    }
-    if (strpos($nameKey, ' ssd ') !== false || strpos($nameKey, ' hdd ') !== false || strpos($nameKey, ' o cung ') !== false) {
-        return 'HDD-SSD';
-    }
-    if (strpos($nameKey, ' mainboard ') !== false || strpos($nameKey, ' bo mach chu ') !== false || strpos($nameKey, ' main ') !== false) {
-        return 'Mainboard';
-    }
-    if (strpos($nameKey, ' cpu ') !== false || strpos($nameKey, ' vi xu ly ') !== false) {
-        return 'CPU';
-    }
+
+    if (strpos($urlKey, 'laptop') !== false || strpos($urlKey, 'macbook') !== false) return 'Laptop';
+    if (strpos($urlKey, 'vga') !== false || strpos($urlKey, 'card-man-hinh') !== false || strpos($urlKey, 'card-do-hoa') !== false) return 'VGA';
+    if (strpos($urlKey, 'man-hinh') !== false || strpos($urlKey, 'monitor') !== false) return 'Màn hình';
+    if (strpos($urlKey, 'tan-nhiet') !== false || strpos($urlKey, 'cooling') !== false) return 'Tản Nhiệt';
+    if (strpos($urlKey, 'o-cung') !== false || strpos($urlKey, 'ssd') !== false || strpos($urlKey, 'hdd') !== false) return 'HDD-SSD';
+    if (strpos($urlKey, 'main') !== false || strpos($urlKey, 'bo-mach-chu') !== false) return 'Mainboard';
+    if (strpos($urlKey, 'cpu') !== false || strpos($urlKey, 'vi-xu-ly') !== false) return 'CPU';
+    if (strpos($urlKey, '/pc') !== false || strpos($urlKey, 'may-tinh-') !== false || strpos($urlKey, 'may-bo') !== false) return 'PC';
+
+    if (strpos($nameKey, ' laptop ') !== false || strpos($nameKey, ' macbook ') !== false) return 'Laptop';
+    if (strpos($nameKey, ' pc ') !== false || strpos($nameKey, ' may bo ') !== false || strpos($nameKey, ' may tinh ') !== false) return 'PC';
+    if (strpos($nameKey, ' vga ') !== false || strpos($nameKey, ' card do hoa ') !== false) return 'VGA';
+    if (strpos($nameKey, ' man hinh ') !== false || strpos($nameKey, ' monitor ') !== false) return 'Màn hình';
+    if (strpos($nameKey, ' tan nhiet ') !== false) return 'Tản Nhiệt';
+    if (strpos($nameKey, ' ssd ') !== false || strpos($nameKey, ' hdd ') !== false) return 'HDD-SSD';
+    if (strpos($nameKey, ' mainboard ') !== false || strpos($nameKey, ' bo mach chu ') !== false) return 'Mainboard';
+    if (strpos($nameKey, ' cpu ') !== false || strpos($nameKey, ' vi xu ly ') !== false) return 'CPU';
+
     return 'Linh kiện';
 }
- 
-// ================= PHẪU THUẬT CHUẨN HÓA KHUÔN THÔNG SỐ AN PHÁT =================
+
+// ================= BỘ ĐỘNG CƠ LỌC THÔNG SỐ (STRICT TEMPLATE MATCHING) =================
 function parseProductSpecifications($xpath) {
-    $specs = []; 
+    // 1. Khởi tạo khuôn thép 8 trường
+    $template_specs = [
+        "CPU" => "",
+        "MAIN" => "",
+        "TẢN NHIỆT" => "",
+        "RAM" => "",
+        "SSD" => "",
+        "VGA" => "",
+        "PSU" => "",
+        "CASE" => ""
+    ];
+
     $rowQueries = [
         "//div[@id='js-pro-specs-data']//table//tr",
         "//div[contains(@class, 'pro-content-body')]//table//tr",
@@ -228,104 +208,94 @@ function parseProductSpecifications($xpath) {
         "//div[contains(@class, 'specs')]//tr",
         "//table//tr"
     ];
+
     $rows = [];
     foreach ($rowQueries as $query) {
         $nodes = $xpath->query($query);
         if ($nodes->length > 0) {
             foreach ($nodes as $node) {
                 $rows[] = $node;
-            } 
-            if (!empty($rows)) break;
+            }
+            break; // Tìm thấy bảng thì dừng vét cạn
         }
     }
-        
-    $headerLabels = [
-        'stt', 'ma hang', 'ten hang', 'thoi han bao hanh', 'bao hanh',
-        'don gia', 'thanh tien', 'so luong', 'don vi', 'ghi chu'
-    ];
-    
+
     foreach ($rows as $row) {
         if (!$row) continue;
-        
-        $label = '';
-        $value = '';
-        $rowText = normalizeTextValue($row->textContent);
-        if ($rowText === '') continue;
-        
+
         $cellNodes = $xpath->query('.//th|.//td', $row);
         $cells = [];
         foreach ($cellNodes as $cell) {
             $cells[] = normalizeTextValue($cell->textContent);
         }
-        $cellCount = count($cells);
-        
-        if ($cellCount >= 3 && preg_match('/^\d+$/', $cells[0])) {
-            $label = $cells[1];
-            $value = $cells[2];
-        } elseif ($cellCount >= 2) {
-            $label = $cells[0];
+
+        $value = '';
+        if (count($cells) >= 3 && preg_match('/^\d+$/', $cells[0])) {
+            $value = $cells[2]; // STT | Loại | Tên -> Lấy Tên
+        } elseif (count($cells) >= 2) {
             $value = $cells[1];
-        } elseif ($cellCount === 1 && strpos($rowText, ':') !== false) {
-            $parts = explode(':', $rowText, 2);
-            $label = normalizeTextValue($parts[0]);
-            $value = normalizeTextValue($parts[1]);
+        } else {
+            $rowText = normalizeTextValue($row->textContent);
+            if (strpos($rowText, ':') !== false) {
+                $parts = explode(':', $rowText, 2);
+                $value = normalizeTextValue($parts[1]);
+            }
         }
-        
-        if ($label === '' || $value === '') continue;
-        
-        $labelKey = removeVietnameseTones($label);
-        $labelKey = trim(preg_replace('/[^a-z0-9 ]+/', ' ', $labelKey));
-        $labelKey = preg_replace('/\s+/', ' ', $labelKey);
-        if (in_array($labelKey, $headerLabels, true)) continue;
-        
-        // ✨ ĐIỀU PHỐI VIÊN AI: Tiến hành dịch nhãn thô sang nhãn chuẩn của hệ thống
-        $k_upper = strtoupper($labelKey);
-        if (strpos($k_upper, 'CPU') !== false || strpos($k_upper, 'VI XU LY') !== false || strpos($k_upper, 'CHIP') !== false) {
-            $label = "Vi xử lý (CPU)";
-        } elseif (strpos($k_upper, 'MAIN') !== false || strpos($k_upper, 'BO MACH CHU') !== false) {
-            $label = "Mainboard";
-        } elseif (strpos($k_upper, 'RAM') !== false || strpos($k_upper, 'BO NHO TRONG') !== false) {
-            $label = "Bộ nhớ RAM";
-        } elseif (strpos($k_upper, 'VGA') !== false || strpos($k_upper, 'CARD') !== false || strpos($k_upper, 'DO HOA') !== false) {
-            $label = "Card đồ họa (VGA)";
-        } elseif (strpos($k_upper, 'SSD') !== false || strpos($k_upper, 'HDD') !== false || strpos($k_upper, 'O CUNG') !== false) {
-            $label = "Ổ cứng lưu trữ";
-        } elseif (strpos($k_upper, 'NGUON') !== false || strpos($k_upper, 'PSU') !== false || strpos($k_upper, 'POWER') !== false) {
-            $label = "Nguồn (PSU)";
-        } elseif (strpos($k_upper, 'CASE') !== false || strpos($k_upper, 'VO ') !== false || strpos($k_upper, 'THUNG MAY') !== false) {
-            $label = "Vỏ Case";
-        } elseif (strpos($k_upper, 'TAN NHIET') !== false || strpos($k_upper, 'COOLING') !== false) {
-            $label = "Tản nhiệt (Cooling)";
-        }
-        
-        if (!isset($specs[$label]) || $specs[$label] === '') {
-            $specs[$label] = $value;
+
+        if ($value === '') continue;
+
+        // Ép chữ hoa để đối chiếu ma trận
+        $rowTextUpper = mb_strtoupper(normalizeTextValue($row->textContent), 'UTF-8');
+
+        // Ma trận Mapping Regex
+        if (empty($template_specs["CPU"]) && preg_match('/(CPU|VI XỬ LÝ|CHIP|I3|I5|I7|I9|RYZEN|THREADRIPPER|INTEL|AMD|CORE)/', $rowTextUpper)) {
+            $template_specs["CPU"] = $value;
+        } elseif (empty($template_specs["MAIN"]) && preg_match('/(MAIN|BO MẠCH|MOTHERBOARD|Z\d{2}0|B\d{2}0|X\d{2}0|H\d{1}10)/', $rowTextUpper)) {
+            $template_specs["MAIN"] = $value;
+        } elseif (empty($template_specs["TẢN NHIỆT"]) && preg_match('/(TẢN NHIỆT|COOL|AIO|FAN|WATER|NOCTUA|THERMAL)/', $rowTextUpper)) {
+            $template_specs["TẢN NHIỆT"] = $value;
+        } elseif (empty($template_specs["RAM"]) && preg_match('/(RAM|MEMORY|DDR4|DDR5)/', $rowTextUpper)) {
+            $template_specs["RAM"] = $value;
+        } elseif (empty($template_specs["SSD"]) && preg_match('/(SSD|HDD|NVME|M\.2|Ổ CỨNG|LƯU TRỮ)/', $rowTextUpper)) {
+            $template_specs["SSD"] = $value;
+        } elseif (empty($template_specs["VGA"]) && preg_match('/(VGA|CARD|ĐỒ HỌA|RTX|GTX|RX|RADEON|GEFORCE|QUADRO)/', $rowTextUpper)) {
+            $template_specs["VGA"] = $value;
+        } elseif (empty($template_specs["PSU"]) && preg_match('/(NGUỒN|PSU|POWER|WATT|80 PLUS)/', $rowTextUpper)) {
+            $template_specs["PSU"] = $value;
+        } elseif (empty($template_specs["CASE"]) && preg_match('/(CASE|VỎ|THÙNG)/', $rowTextUpper)) {
+            $template_specs["CASE"] = $value;
         }
     }
-    return $specs;
+
+    // Lọc bỏ những trường trống
+    return array_filter($template_specs, function($val) {
+        return $val !== "";
+    });
 }
- 
+
 function getRequestProtocol() {
-    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) {
-        return strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https' ? 'https' : 'http';
-    }
-    if (!empty($_SERVER['REQUEST_SCHEME'])) {
-        return strtolower($_SERVER['REQUEST_SCHEME']);
-    }
-    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') {
-        return 'https';
-    }
+    if (!empty($_SERVER['HTTP_X_FORWARDED_PROTO'])) return strtolower($_SERVER['HTTP_X_FORWARDED_PROTO']) === 'https' ? 'https' : 'http';
+    if (!empty($_SERVER['REQUEST_SCHEME'])) return strtolower($_SERVER['REQUEST_SCHEME']);
+    if (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') return 'https';
     return 'http';
 }
- 
+
+function normalizeImageUrl($url) {
+    $url = trim($url);
+    if ($url === '') return '';
+    if (strpos($url, '//') === 0) return 'https:' . $url;
+    if (preg_match('#^https?://#i', $url)) return preg_replace('#^http://#i', 'https://', $url);
+    return $url;
+}
+
 if (!defined('IMGUR_CLIENT_ID')) {
     define('IMGUR_CLIENT_ID', '139e72807f61c3c');
 }
+
 function fetchImageData($imageUrl) {
     $imageUrl = trim($imageUrl);
-    if (empty($imageUrl) || stripos($imageUrl, 'data:image') === 0) {
-        return null;
-    }
+    if (empty($imageUrl) || stripos($imageUrl, 'data:image') === 0) return null;
+
     $ch = curl_init($imageUrl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
@@ -333,18 +303,19 @@ function fetchImageData($imageUrl) {
         "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ]);
+    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+    curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     $data = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    if ($data === false || $httpCode !== 200 || strlen($data) < 100) {
-        return null;
-    }
+
+    if ($data === false || $httpCode !== 200 || strlen($data) < 100) return null;
     return $data;
 }
+
 function uploadImageToImgur($imageData, $clientId) {
-    if (empty($imageData) || empty($clientId)) {
-        return null;
-    }
+    if (empty($imageData) || empty($clientId)) return null;
+
     $ch = curl_init('https://api.imgur.com/3/image');
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_POST, true);
@@ -355,89 +326,90 @@ function uploadImageToImgur($imageData, $clientId) {
     ]);
     curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 40);
+
     $resp = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
     curl_close($ch);
-    if ($resp === false || $httpCode !== 200) {
-        return null;
-    }
+
+    if ($resp === false || $httpCode !== 200) return null;
+
     $json = json_decode($resp, true);
     if (!empty($json['success']) && !empty($json['data']['link'])) {
         return normalizeImageUrl($json['data']['link']);
     }
     return null;
 }
+
 function buildCleanImageUrl($imageUrl) {
     $raw = fetchImageData($imageUrl);
-    if ($raw === null) {
-        return '';
-    }
+    if ($raw === null) return '';
     $link = uploadImageToImgur($raw, IMGUR_CLIENT_ID);
     return $link !== null ? $link : '';
 }
- 
+
 function fetchAnPhatCategoryProductLinks($categoryUrl, $offset, $batchSize, &$totalLinks) {
     $totalLinks = 0;
     $firstPageHtml = fetchHTML($categoryUrl);
     if (!$firstPageHtml) return [];
+
     $dom = new DOMDocument();
     @$dom->loadHTML(mb_convert_encoding($firstPageHtml, 'HTML-ENTITIES', 'UTF-8'));
     $xpath = new DOMXPath($dom);
-    
+
     $totalNode = $xpath->query("//div[contains(@class, 'product-list-filter')]//div[contains(@class, 'right')]//strong");
     if($totalNode->length > 0) {
         $totalLinks = (int)preg_replace('/[^0-9]/', '', $totalNode->item(0)->nodeValue);
     }
-    
+
     $perPage = 20;
     $startPage = intdiv($offset, $perPage) + 1;
     $pageOffset = $offset % $perPage;
     $currentPage = $startPage;
     $required = $batchSize;
     $links = [];
-    
+
     while ($required > 0) {
         $pageUrl = $categoryUrl . ($currentPage > 1 ? "?page={$currentPage}" : "");
         $html = ($currentPage === $startPage) ? $firstPageHtml : fetchHTML($pageUrl);
         if (!$html) break;
-        
+
         $pageDom = new DOMDocument();
         @$pageDom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
         $pageXPath = new DOMXPath($pageDom);
-        
+
         $itemNodes = $pageXPath->query("//div[contains(@class, 'p-item')]//a[contains(@class, 'p-img')]");
         $pageItems = [];
         foreach ($itemNodes as $node) {
             $href = $node->getAttribute('href');
             if (!empty($href)) { 
-                 $pageItems[] = resolveAbsoluteUrl($href, $categoryUrl);
+                $pageItems[] = resolveAbsoluteUrl($href, $categoryUrl);
             }
         }
+
         if (empty($pageItems)) break;
+
         if ($currentPage === $startPage && $pageOffset > 0) {
             $pageItems = array_slice($pageItems, $pageOffset);
         }
+
         foreach ($pageItems as $item) {
             if ($required <= 0) break;
             $links[] = $item;
             $required--;
         }
-        if ($required <= 0 || count($pageItems) < ($perPage - ($currentPage === $startPage ? $pageOffset : 0))) {
-            break;
-        }
+
+        if ($required <= 0 || count($pageItems) < ($perPage - ($currentPage === $startPage ? $pageOffset : 0))) break;
         $currentPage++;
-        if ($totalLinks > 0 && $currentPage > ceil($totalLinks / $perPage)) {
-            break;
-        }
+        if ($totalLinks > 0 && $currentPage > ceil($totalLinks / $perPage)) break;
     }
     return array_unique($links);
 }
- 
+
 // BẮT LINK TỪ FRONTEND TRUYỀN XUỐNG
 $target_url = isset($_GET['url']) ? trim($_GET['url']) : '';
 $offset = isset($_GET['offset']) ? max(0, intval($_GET['offset'])) : 0;
 $batch_size = 5;
- 
+
 if (empty($target_url)) {
     echo json_encode(["status" => "error", "message" => "Vui lòng dán đường link An Phát PC cần cào dữ liệu!"]);
     exit();
@@ -446,23 +418,27 @@ if (strpos($target_url, 'anphatpc.com.vn') === false) {
     echo json_encode(["status" => "error", "message" => "Link không hợp lệ, chỉ chấp nhận link từ anphatpc.com.vn"]);
     exit();
 }
- 
+
 try {
+    logBotAction("=== BẮT ĐẦU CÀO BATCH MỚI: Offset $offset ===");
+
     $database = new Database();
     $db = $database->getConnection();
-        
+    
     $insertedCount = 0;
     $updatedCount = 0;
     $processedCount = 0;
     $skippedCount = 0;
-    $default_image = "https://via.placeholder.com/400x300?text=An+Phat+PC";
-        
+    $default_image = "https://placehold.co/400x300/f8f9fa/a1a1aa?text=An+Phat+PC";
+    
     $check_query = "SELECT id, source, image_url FROM products WHERE product_name = :name LIMIT 1";
     $stmt_check = $db->prepare($check_query);
+
     $insert_query = "INSERT INTO products 
                      (product_name, price, is_price_visible, image_url, description, manufacturer, product_type, status, source, specifications) 
                      VALUES (:name, :price, 1, :image, '', '', :ptype, 'pending', 'bot', :specs)";
     $stmt_insert = $db->prepare($insert_query);
+
     $update_query = "UPDATE products SET 
                         specifications = :specs, 
                         price = :price, 
@@ -472,16 +448,17 @@ try {
                         image_url = COALESCE(NULLIF(:image_update, ''), image_url) 
                      WHERE id = :id";
     $stmt_update = $db->prepare($update_query);
- 
+
     $html = fetchHTML($target_url);
     if (!$html) throw new Exception("Không thể truy cập đường link này. Web có thể đang chặn Bot.");
-    
+
     $dom = new DOMDocument();
     @$dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
     $xpath = new DOMXPath($dom);
+
     $product_links = [];
     $total_links = 0;
-    
+
     $isProductPage = $xpath->query("//div[contains(@class, 'pro-detail')]")->length > 0;
     if ($isProductPage) {
         $product_links[] = $target_url;
@@ -489,38 +466,39 @@ try {
     } else {
         $product_links = fetchAnPhatCategoryProductLinks($target_url, $offset, $batch_size, $total_links);
     }
-        
+    
     if (empty($product_links)) {
         throw new Exception("Không tìm thấy sản phẩm nào trong link này để cào.");
     }
-        
+    
     $current_batch = $product_links;
     if (!$isProductPage && $total_links == 0) {
         $total_links = count($product_links); 
     }
-    if (empty($current_batch)) {
-        throw new Exception("Không còn sản phẩm để cào tại vị trí offset này.");
-    }
- 
+
+    // BƯỚC 2: TIẾN HÀNH THÂM NHẬP VÀ BÓC TÁCH TỪNG SẢN PHẨM
     foreach ($current_batch as $link) {
         usleep(300000); 
-                
+        
         $detail_html = fetchHTML($link);
         if (!$detail_html) {
+            logBotAction("LỖI MẠNG (Timeout/Block) khi truy cập: " . $link);
             $skippedCount++;
             continue;
         }
+
         $detail_dom = new DOMDocument();
         @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
         $detail_xpath = new DOMXPath($detail_dom);
-        
+
         $nameNode = $detail_xpath->query("//div[contains(@class, 'pro-detail-head')]//h1");
         if ($nameNode->length === 0) {
+            logBotAction("BỎ QUA (Không tìm thấy Tên SP): " . $link);
             $skippedCount++;
             continue;
         }
         $product_name = normalizeTextValue($nameNode->item(0)->nodeValue);
-        
+
         $priceNode = $detail_xpath->query("//div[contains(@class, 'price-container')]//span[contains(@class, 'price')]");
         $price_val = 0;
         if ($priceNode->length > 0) {
@@ -528,29 +506,40 @@ try {
             $price_val = (int) preg_replace('/[^0-9]/', '', $raw_price);
         }
         if ($price_val == 0) $price_val = null; 
-        
+
         $source_image = findProductImageUrl($detail_xpath, $link);
+
         $specs = parseProductSpecifications($detail_xpath);
-        $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
-        $product_type = classifyAnPhatProductType($product_name, $target_url);
         
+        // ================= VALIDATION LAYER =================
+        if (count($specs) < 3) {
+            logBotAction("BỎ QUA (Cấu hình rác / < 3 trường): " . $product_name);
+            $skippedCount++;
+            continue; // Nhảy ngay sang sản phẩm tiếp theo, không lưu!
+        }
+        
+        $specs_json = json_encode($specs, JSON_UNESCAPED_UNICODE);
+        $product_type = classifyAnPhatProductType($product_name, $target_url);
+
+        // BƯỚC 3: KIỂM TRA TRÙNG LẶP VÀ ĐƯA VÀO KHO
         $stmt_check->bindParam(":name", $product_name);
         $stmt_check->execute();
         $existing_product = $stmt_check->fetch(PDO::FETCH_ASSOC);
-        
+
         if ($existing_product) {
             $image_update = '';
             $existing_image = $existing_product['image_url'] ?? '';
             if (!empty($source_image) && stripos($existing_image, 'imgur.com') === false) {
                 $image_update = buildCleanImageUrl($source_image);
             }
-                        
+            
             $stmt_update->bindParam(":specs", $specs_json);
             $stmt_update->bindParam(":price", $price_val);
             $stmt_update->bindParam(":ptype", $product_type);
             $stmt_update->bindParam(":image_update", $image_update);
             $stmt_update->bindParam(":id", $existing_product['id']);
             if ($stmt_update->execute()) {
+                logBotAction("CẬP NHẬT THÀNH CÔNG: " . $product_name);
                 $updatedCount++;
                 $processedCount++;
             }
@@ -566,19 +555,23 @@ try {
             $stmt_insert->bindParam(":ptype", $product_type);
             $stmt_insert->bindParam(":specs", $specs_json);
             if ($stmt_insert->execute()) {
+                logBotAction("THÊM MỚI THÀNH CÔNG: " . $product_name);
                 $insertedCount++;
                 $processedCount++;
             }
         }
     }
-    
+
     $message = "Đã cào thành công {$processedCount} sản phẩm.";
     $next_offset = $isProductPage ? 1 : $offset + count($current_batch);
     $has_more = !$isProductPage && $next_offset < $total_links;
+
     if ($has_more) {
         $message = "Đã cào thành công {$processedCount} sản phẩm, Bot phát hiện còn sản phẩm chưa cào, bạn muốn tiếp tục lấy thêm 5 sản phẩm không?";
     }
     
+    logBotAction("=== HOÀN TẤT BATCH: Thêm $insertedCount | Cập nhật $updatedCount | Bỏ qua rác $skippedCount ===");
+
     echo json_encode([
         "status" => "success",
         "message" => $message,
@@ -597,7 +590,9 @@ try {
             "continue_label" => $has_more ? "Tiếp tục cào 5 sản phẩm" : "Hoàn tất"
         ]
     ]);
+
 } catch (Exception $e) {
+    logBotAction("CRITICAL ERROR: " . $e->getMessage());
     http_response_code(500);
     echo json_encode([
         "status" => "error",
