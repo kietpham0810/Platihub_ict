@@ -16,7 +16,7 @@ ini_set('memory_limit', '512M');
 
 require_once '../config/database.php';
 
-// HÀM LẤY HTML CHỐNG BLOCK
+// HÀM LẤY HTML CHỐNG BLOCK VỚI BÁO LỖI CHI TIẾT
 function fetchHTML($url) {
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
@@ -32,6 +32,15 @@ function fetchHTML($url) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 20); 
     
     $html = curl_exec($ch);
+
+    if ($html === false) {
+        $error_no = curl_errno($ch);
+        $error_msg = curl_error($ch);
+        curl_close($ch);
+        // Ném ra Exception với thông tin lỗi chi tiết từ cURL
+        throw new Exception("cURL Error (errno {$error_no}): {$error_msg}. Không thể kết nối tới URL: {$url}. Vui lòng kiểm tra lại kết nối mạng của host hoặc IP của bạn có thể đã bị An Phát PC chặn.");
+    }
+    
     curl_close($ch);
     return $html;
 }
@@ -190,9 +199,19 @@ function downloadRemoteImage($imageUrl, $saveDir) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     $imageData = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    if($imageData === false) {
+        $error_no = curl_errno($ch);
+        $error_msg = curl_error($ch);
+        curl_close($ch);
+        // Log or handle error but don't stop the whole script, just return original URL
+        error_log("Image Download cURL Error (errno {$error_no}): {$error_msg} for URL: {$imageUrl}");
+        return $imageUrl;
+    }
+    
     curl_close($ch);
 
-    if ($imageData !== false && $httpCode === 200 && file_put_contents($localFile, $imageData)) {
+    if ($httpCode === 200 && file_put_contents($localFile, $imageData)) {
         return getPublicImageUrl($localFile);
     }
     return $imageUrl;
@@ -211,8 +230,17 @@ function fetchImageData($imageUrl) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
     $data = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    
+    if($data === false) {
+        $error_no = curl_errno($ch);
+        $error_msg = curl_error($ch);
+        curl_close($ch);
+        error_log("Image Data Fetch cURL Error (errno {$error_no}): {$error_msg} for URL: {$imageUrl}");
+        return null;
+    }
+
     curl_close($ch);
-    return ($data !== false && $httpCode === 200 && strlen($data) > 100) ? $data : null;
+    return ($httpCode === 200 && strlen($data) > 100) ? $data : null;
 }
 
 function uploadImageToImgur($imageData, $clientId) {
@@ -226,8 +254,18 @@ function uploadImageToImgur($imageData, $clientId) {
     curl_setopt($ch, CURLOPT_TIMEOUT, 40);
     $resp = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+
+    if($resp === false) {
+        $error_no = curl_errno($ch);
+        $error_msg = curl_error($ch);
+        curl_close($ch);
+        error_log("Imgur Upload cURL Error (errno {$error_no}): {$error_msg}");
+        return null;
+    }
+
     curl_close($ch);
-    if ($resp === false || $httpCode !== 200) return null;
+
+    if ($httpCode !== 200) return null;
     $json = json_decode($resp, true);
     return !empty($json['success']) && !empty($json['data']['link']) ? normalizeImageUrl($json['data']['link']) : null;
 }
@@ -273,7 +311,7 @@ try {
 
     // BƯỚC 1: QUÉT LINK GỐC ĐỂ XEM LÀ DANH MỤC HAY SẢN PHẨM LẺ
     $html = fetchHTML($target_url);
-    if (!$html) throw new Exception("Không thể truy cập đường link này. Web có thể đang chặn Bot.");
+    // if (!$html) throw new Exception("Không thể truy cập đường link này. Web có thể đang chặn Bot."); // The exception is now thrown from inside fetchHTML
 
     $dom = new DOMDocument();
     @$dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
@@ -294,7 +332,19 @@ try {
         $all_links = [];
         for ($i = 1; $i <= 50; $i++) { // Giới hạn 50 trang để tránh loop vô tận
             $page_url = $target_url . ($i > 1 ? "?page={$i}" : "");
-            $page_html = ($i > 1) ? fetchHTML($page_url) : $html;
+            // For subsequent pages, we must call fetchHTML again.
+            if ($i > 1) {
+                try {
+                    $page_html = fetchHTML($page_url);
+                } catch (Exception $e) {
+                    // Log error for this page and stop paginating
+                    error_log("Stopping pagination at page {$i} due to error: " . $e->getMessage());
+                    break;
+                }
+            } else {
+                $page_html = $html;
+            }
+
             if (!$page_html) break;
 
             $page_dom = new DOMDocument();
@@ -319,14 +369,22 @@ try {
     $current_batch = array_slice($product_links, $offset, $batch_size);
 
     if (empty($current_batch)) {
-        throw new Exception("Không tìm thấy sản phẩm nào để cào hoặc đã cào hết ở vị trí này.");
+        // Changed exception message to be more accurate
+        throw new Exception("Không tìm thấy sản phẩm nào trong link danh mục, hoặc đã cào hết.");
     }
 
     // BƯỚC 2: TIẾN HÀNH THÂM NHẬP VÀ BÓC TÁCH TỪNG SẢN PHẨM
     foreach ($current_batch as $link) {
         usleep(300000); // Ngủ 0.3s để tránh bị block IP
         
-        $detail_html = fetchHTML($link);
+        try {
+            $detail_html = fetchHTML($link);
+        } catch (Exception $e) {
+            error_log("Skipping product link {$link} due to connection error: " . $e->getMessage());
+            $skippedCount++;
+            continue;
+        }
+
         if (!$detail_html) { $skippedCount++; continue; }
 
         $detail_dom = new DOMDocument();
