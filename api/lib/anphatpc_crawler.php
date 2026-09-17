@@ -766,8 +766,9 @@ function runAutoCrawlAllCategories($db, ?callable $logFn = null, $maxNewPerRun =
  * khớp, dừng khi đủ $wantCount sản phẩm mới hoặc quét hết $scanCap sản phẩm.
  * Dùng cho api/crawl_filtered.php (nút "Cào theo bộ lọc" ở trang admin).
  */
-function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scanCap, ?callable $logFn = null) {
+function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scanCap, ?callable $logFn = null, ?callable $progressFn = null) {
     $log = $logFn ?: function ($msg) {};
+    $progress = $progressFn ?: function ($stats) {};
     $collection = $db->products;
     $default_image = "https://via.placeholder.com/400x300?text=An+Phat+PC";
 
@@ -813,6 +814,24 @@ function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scan
     $CHUNK_SIZE = 6;
     $linksToScan = array_slice($links, 0, $scanCap);
     $chunks = array_chunk($linksToScan, $CHUNK_SIZE);
+    $scanLimit = count($linksToScan);
+
+    // Báo tiến độ realtime cho FE (xem api/crawl_filtered.php - stream NDJSON)
+    // sau mỗi sản phẩm được xử lý, để admin biết đang cào tới đâu thay vì chờ
+    // mù mờ không rõ còn bao lâu.
+    $emitProgress = function () use (&$scannedCount, &$insertedCount, &$updatedCount, &$excludedCount, &$filteredOutCount, $wantCount, &$totalLinks, $scanLimit, $progress) {
+        $progress([
+            'scanned' => $scannedCount,
+            'scan_limit' => $scanLimit,
+            'new_inserted' => $insertedCount,
+            'updated_specifications' => $updatedCount,
+            'excluded' => $excludedCount,
+            'filtered_out' => $filteredOutCount,
+            'want_count' => $wantCount,
+            'total_links_in_category' => $totalLinks,
+        ]);
+    };
+    $emitProgress();
 
     foreach ($chunks as $chunk) {
         if ($insertedCount >= $wantCount) {
@@ -829,6 +848,7 @@ function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scan
                 break;
             }
             $scannedCount++;
+            $emitProgress();
 
             $detail_html = $htmlByUrl[$link] ?? false;
             if (!$detail_html) {
@@ -946,7 +966,8 @@ function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scan
                 ]);
                 $insertedCount++;
             $log("  [+ mới] {$product_name}");
-        }
+            }
+            $emitProgress();
         }
 
         if ($insertedCount < $wantCount) {
