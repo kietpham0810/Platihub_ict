@@ -1,17 +1,9 @@
 <?php
-// BƯỚC 1: MỞ CỬA CORS CHO CẢ POST VÀ OPTIONS
-header("Access-Control-Allow-Origin: *");
-header("Content-Type: application/json; charset=UTF-8");
-header("Access-Control-Allow-Methods: GET, POST, OPTIONS, PUT, DELETE");
-header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
+require_once '../config/auth.php';
+cors_allow_origin(['POST', 'OPTIONS']);
+require_admin_auth();
 
-// BƯỚC 2: CHẶN ĐỨNG PREFLIGHT (BẢO VỆ LOGIC)
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
-
-// BƯỚC 3: LOGIC XÓA SẢN PHẨM
+// LOGIC XÓA SẢN PHẨM
 require_once '../config/database.php';
 require_once '../config/mongo_helpers.php';
 

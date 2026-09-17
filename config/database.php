@@ -33,11 +33,11 @@ class Database {
             $client->selectDatabase('admin')->command(['ping' => 1]);
             $this->conn = $client->selectDatabase($this->db_name);
         } catch (\Throwable $exception) {
+            error_log('[Database] ' . $exception->getMessage());
             http_response_code(500);
             echo json_encode([
                 "status" => "error",
-                "message" => "Lỗi kết nối Cơ sở dữ liệu MongoDB.",
-                "error_detail" => $exception->getMessage()
+                "message" => "Lỗi kết nối Cơ sở dữ liệu MongoDB."
             ]);
             exit();
         }

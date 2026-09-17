@@ -8,17 +8,13 @@
 // STREAM NDJSON: mỗi dòng echo ra là 1 object JSON độc lập (type="progress"
 // nhiều dòng trong lúc chạy, rồi 1 dòng type="result" cuối cùng) - để FE đọc
 // tiến độ theo thời gian thực qua ReadableStream thay vì chờ mù đến khi xong.
-header("Access-Control-Allow-Origin: *");
+require_once '../config/auth.php';
+cors_allow_origin(['POST', 'OPTIONS']);
+require_admin_auth();
+
 header("Content-Type: application/x-ndjson; charset=UTF-8");
-header("Access-Control-Allow-Methods: POST, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
 header("Cache-Control: no-cache");
 header("X-Accel-Buffering: no"); // Tắt buffer nếu Render đặt sau proxy kiểu nginx
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
 
 // Cào theo bộ lọc có thể phải quét/lọc qua nhiều sản phẩm mới đủ số lượng cần
 // -> nới lỏng timeout giống các endpoint cào khác.
@@ -56,6 +52,13 @@ $emitLine = function (array $payload) {
 if (empty($target_url)) {
     http_response_code(400);
     $emitLine(["type" => "result", "status" => "error", "message" => "Thiếu URL danh mục cần cào."]);
+    exit();
+}
+
+// CHỐNG SSRF: chỉ cho phép cào từ đúng domain An Phát PC.
+if (!is_allowed_crawl_host($target_url)) {
+    http_response_code(400);
+    $emitLine(["type" => "result", "status" => "error", "message" => "Chỉ hỗ trợ cào dữ liệu từ anphatpc.com.vn."]);
     exit();
 }
 

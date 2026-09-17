@@ -4,12 +4,61 @@
 // admin dán link cào thủ công) và script CLI tự động (cli/auto_crawl_anphat.php,
 // chạy theo lịch mỗi ngày). Tách ra đây để không lặp code giữa 2 nơi gọi.
 
+// CHỐNG SSRF: chỉ chấp nhận URL thuộc đúng domain An Phát PC (kể cả subdomain
+// www). Trước đây $target_url do client gửi lên được dùng thẳng cho curl mà
+// không kiểm tra, cho phép ép server fetch bất kỳ URL nào (mạng nội bộ,
+// localhost, endpoint metadata cloud...).
+function is_allowed_crawl_host(string $url): bool {
+    $host = parse_url($url, PHP_URL_HOST);
+    if (!$host) return false;
+    $host = strtolower($host);
+    return $host === 'anphatpc.com.vn' || $host === 'www.anphatpc.com.vn';
+}
+
+// CHỐNG SSRF (lớp 2): áp dụng cho MỌI url trước khi cURL fetch, kể cả những
+// url được phát hiện gián tiếp trong lúc cào (ảnh, link nội bộ trang, hoặc
+// địa chỉ mà server bị redirect tới) - không chỉ url gốc client gửi lên.
+// Chỉ cho scheme http/https và IP đã resolve KHÔNG được là địa chỉ riêng tư/
+// loopback/link-local (chặn cả trường hợp domain trỏ hoặc bị redirect vào
+// 127.0.0.1, 169.254.169.254 - cloud metadata, mạng LAN nội bộ...).
+function is_safe_public_url($url): bool {
+    if (!is_string($url) || $url === '') return false;
+    $parts = parse_url($url);
+    if (!$parts || empty($parts['scheme']) || empty($parts['host'])) return false;
+    if (!in_array(strtolower($parts['scheme']), ['http', 'https'], true)) return false;
+
+    $host = $parts['host'];
+    $ip = filter_var($host, FILTER_VALIDATE_IP) ? $host : gethostbyname($host);
+    if ($ip === $host && !filter_var($host, FILTER_VALIDATE_IP)) {
+        // gethostbyname không resolve được (trả nguyên hostname khi lỗi)
+        return false;
+    }
+
+    return filter_var($ip, FILTER_VALIDATE_IP, FILTER_FLAG_NO_PRIV_RANGE | FILTER_FLAG_NO_RES_RANGE) !== false;
+}
+
+// Kiểm tra AN TOÀN trước khi fetch: chặn cả trường hợp bị 3xx redirect sang
+// host không an toàn (curl_getinfo EFFECTIVE_URL phản ánh URL cuối cùng sau
+// khi đã follow redirect).
+function curl_result_is_from_safe_url($ch): bool {
+    $effectiveUrl = curl_getinfo($ch, CURLINFO_EFFECTIVE_URL);
+    return $effectiveUrl ? is_safe_public_url($effectiveUrl) : false;
+}
+
 // HÀM LẤY HTML CHỐNG BLOCK
 function fetchHTML($url) {
+    if (!is_safe_public_url($url)) {
+        error_log('[SSRF blocked] fetchHTML từ chối url không an toàn: ' . $url);
+        return false;
+    }
+
     $ch = curl_init();
     curl_setopt($ch, CURLOPT_URL, $url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
 
     // VŨ KHÍ MỚI: Yêu cầu server trả về file nén GZIP/Deflate để tăng tốc độ tải lên x5 lần
     curl_setopt($ch, CURLOPT_ENCODING, "");
@@ -19,7 +68,6 @@ function fetchHTML($url) {
         "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
 
     // Nới lỏng sức chịu đựng lên 45 giây để vượt qua các trang nặng
     curl_setopt($ch, CURLOPT_TIMEOUT, 45);
@@ -29,6 +77,14 @@ function fetchHTML($url) {
     // Bắt lỗi thô để dễ debug nếu tiếp tục tịt ngòi
     if (curl_errno($ch)) {
         error_log('Lỗi cURL: ' . curl_error($ch));
+    }
+
+    // Chặn SSRF qua redirect: nếu server bị 3xx dẫn sang IP nội bộ/loopback,
+    // loại bỏ kết quả thay vì trả về nội dung đã fetch được.
+    if ($html !== false && !curl_result_is_from_safe_url($ch)) {
+        error_log('[SSRF blocked] fetchHTML bị redirect sang url không an toàn: ' . $url);
+        curl_close($ch);
+        return false;
     }
 
     curl_close($ch);
@@ -46,18 +102,26 @@ function fetchHTMLMulti(array $urls) {
 
     $mh = curl_multi_init();
     $handles = [];
+    $results = [];
 
     foreach ($urls as $url) {
+        if (!is_safe_public_url($url)) {
+            error_log('[SSRF blocked] fetchHTMLMulti từ chối url không an toàn: ' . $url);
+            $results[$url] = false;
+            continue;
+        }
         $ch = curl_init($url);
         curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
         curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+        curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+        curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
         curl_setopt($ch, CURLOPT_ENCODING, "");
         curl_setopt($ch, CURLOPT_HTTPHEADER, [
             "Accept: text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
             "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
             "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
         ]);
-        curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
         curl_setopt($ch, CURLOPT_TIMEOUT, 20);
         curl_multi_add_handle($mh, $ch);
         $handles[$url] = $ch;
@@ -71,10 +135,12 @@ function fetchHTMLMulti(array $urls) {
         }
     } while ($running > 0 && $status === CURLM_OK);
 
-    $results = [];
     foreach ($handles as $url => $ch) {
         $content = curl_multi_getcontent($ch);
-        $results[$url] = $content !== null && $content !== '' ? $content : false;
+        // Chặn SSRF qua redirect: nếu bị dẫn sang host không an toàn, coi như fetch lỗi.
+        $results[$url] = ($content !== null && $content !== '' && curl_result_is_from_safe_url($ch))
+            ? $content
+            : false;
         curl_multi_remove_handle($mh, $ch);
         curl_close($ch);
     }
@@ -84,17 +150,31 @@ function fetchHTMLMulti(array $urls) {
 }
 
 function fetchUrl($url, $headers = []) {
+    if (!is_safe_public_url($url)) {
+        error_log('[SSRF blocked] fetchUrl từ chối url không an toàn: ' . $url);
+        return false;
+    }
+
     $ch = curl_init($url);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
     curl_setopt($ch, CURLOPT_HTTPHEADER, array_merge([
         "Accept: */*",
         "Accept-Language: vi-VN,vi;q=0.9,en-US;q=0.8,en;q=0.7",
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ], $headers));
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 20);
     $result = curl_exec($ch);
+
+    if ($result !== false && !curl_result_is_from_safe_url($ch)) {
+        error_log('[SSRF blocked] fetchUrl bị redirect sang url không an toàn: ' . $url);
+        curl_close($ch);
+        return false;
+    }
+
     curl_close($ch);
     return $result;
 }
@@ -600,21 +680,32 @@ function fetchImageData($imageUrl) {
         return null;
     }
 
+    // Ảnh được trích ra từ nội dung trang đã cào (og:image, src...), không
+    // phải url do client trực tiếp gửi lên -> vẫn phải qua kiểm tra an toàn
+    // giống mọi url khác, tránh mở rộng bề mặt SSRF qua nội dung trang.
+    if (!is_safe_public_url($imageUrl)) {
+        error_log('[SSRF blocked] fetchImageData từ chối url không an toàn: ' . $imageUrl);
+        return null;
+    }
+
     $ch = curl_init($imageUrl);
     curl_setopt($ch, CURLOPT_RETURNTRANSFER, true);
     curl_setopt($ch, CURLOPT_FOLLOWLOCATION, true);
+    curl_setopt($ch, CURLOPT_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_REDIR_PROTOCOLS, CURLPROTO_HTTP | CURLPROTO_HTTPS);
+    curl_setopt($ch, CURLOPT_MAXREDIRS, 5);
     curl_setopt($ch, CURLOPT_HTTPHEADER, [
         "Accept: image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
         "User-Agent: Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36"
     ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 30);
 
     $data = curl_exec($ch);
     $httpCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+    $safeAfterRedirect = curl_result_is_from_safe_url($ch);
     curl_close($ch);
 
-    if ($data === false || $httpCode !== 200 || strlen($data) < 100) {
+    if ($data === false || $httpCode !== 200 || strlen($data) < 100 || !$safeAfterRedirect) {
         return null;
     }
     return $data;
@@ -634,7 +725,6 @@ function uploadImageToImgur($imageData, $clientId) {
         "image" => base64_encode($imageData),
         "type" => "base64"
     ]);
-    curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
     curl_setopt($ch, CURLOPT_TIMEOUT, 40);
 
     $resp = curl_exec($ch);

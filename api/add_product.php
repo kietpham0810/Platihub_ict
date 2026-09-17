@@ -1,9 +1,8 @@
 <?php
 // api/add_product.php
-header("Access-Control-Allow-Origin: *");
-header("Content-Type: application/json; charset=UTF-8");
-header("Access-Control-Allow-Methods: POST");
-header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
+require_once '../config/auth.php';
+cors_allow_origin(['POST', 'OPTIONS']);
+require_admin_auth();
 
 require_once '../config/database.php';
 
@@ -26,9 +25,14 @@ if (
     !empty($data->image_url) &&
     !empty($data->product_type)
 ) {
-    // Xử lý dữ liệu sạch
+    // Xử lý dữ liệu sạch (escape mọi field text để tránh stored XSS khi FE
+    // render lại - trước đây chỉ description được escape, gây thiếu nhất
+    // quán với update_product.php)
+    $product_name = htmlspecialchars(strip_tags($data->product_name));
+    $image_url = htmlspecialchars(strip_tags($data->image_url));
+    $product_type = htmlspecialchars(strip_tags($data->product_type));
     $desc = !empty($data->description) ? htmlspecialchars(strip_tags($data->description)) : "";
-    $manufacturer = !empty($data->manufacturer) ? $data->manufacturer : "";
+    $manufacturer = !empty($data->manufacturer) ? htmlspecialchars(strip_tags($data->manufacturer)) : "";
 
     // XỬ LÝ SPECIFICATIONS: Chuyển Object thành chuỗi JSON (Giữ nguyên Unicode tiếng Việt)
     $specs_json = NULL;
@@ -38,11 +42,11 @@ if (
 
     try {
         $result = $collection->insertOne([
-            'product_name' => $data->product_name,
-            'image_url' => $data->image_url,
+            'product_name' => $product_name,
+            'image_url' => $image_url,
             'description' => $desc,
             'manufacturer' => $manufacturer,
-            'product_type' => $data->product_type,
+            'product_type' => $product_type,
             'price' => null,
             'is_price_visible' => 0,
             'specifications' => $specs_json,
@@ -61,11 +65,11 @@ if (
             throw new Exception("Execute failed.");
         }
     } catch (Exception $e) {
+        error_log('[add_product] ' . $e->getMessage());
         http_response_code(500);
         echo json_encode([
             "status" => "error",
-            "message" => "Lỗi Database: Không thể thêm sản phẩm.",
-            "error_detail" => $e->getMessage()
+            "message" => "Lỗi Database: Không thể thêm sản phẩm."
         ]);
     }
 } else {

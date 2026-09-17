@@ -1,7 +1,7 @@
 <?php
-// Mở cổng giao tiếp CORS
-header("Access-Control-Allow-Origin: *");
-header("Content-Type: application/json; charset=UTF-8");
+require_once '../config/auth.php';
+cors_allow_origin(['GET', 'OPTIONS']);
+
 require_once '../config/database.php';
 require_once '../config/mongo_helpers.php';
 
@@ -12,6 +12,12 @@ try {
 
     // Kiểm tra xem Frontend có yêu cầu lọc theo trạng thái không (ví dụ: ?status=pending)
     $status_filter = isset($_GET['status']) ? trim($_GET['status']) : '';
+
+    // Sản phẩm "pending" (chưa duyệt) chỉ admin mới được xem - trước đây ai
+    // cũng gọi được ?status=pending mà không cần đăng nhập.
+    if ($status_filter !== '' && $status_filter !== 'approved') {
+        require_admin_auth();
+    }
 
     // KIẾN TRÚC THÉP: Chặn rác ngay từ truy vấn (Fix BUG-01 & BUG-02)
     // Chỉ lấy những sản phẩm CÓ ảnh hợp lệ.
@@ -40,12 +46,11 @@ try {
     ]);
 
 } catch (Exception $e) {
-    // Xử lý lỗi hệ thống chuẩn chỉ
+    error_log('[get_products] ' . $e->getMessage());
     http_response_code(500);
     echo json_encode([
         "status" => "error",
-        "message" => "Lỗi truy xuất dữ liệu.",
-        "error_detail" => $e->getMessage()
+        "message" => "Lỗi truy xuất dữ liệu."
     ]);
 }
 ?>

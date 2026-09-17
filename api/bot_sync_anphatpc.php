@@ -3,15 +3,9 @@
 // Endpoint HTTP: admin dán 1 link An Phát PC ở trang admin để cào thủ công.
 // Logic cào thật sự nằm ở api/lib/anphatpc_crawler.php (dùng chung với
 // cli/auto_crawl_anphat.php - script tự động cào theo lịch mỗi ngày).
-header("Access-Control-Allow-Origin: *");
-header("Content-Type: application/json; charset=UTF-8");
-header("Access-Control-Allow-Methods: GET, POST, OPTIONS");
-header("Access-Control-Allow-Headers: Content-Type, Access-Control-Allow-Headers, Authorization, X-Requested-With");
-
-if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
-    http_response_code(200);
-    exit();
-}
+require_once '../config/auth.php';
+cors_allow_origin(['GET', 'POST', 'OPTIONS']);
+require_admin_auth();
 
 // Chống timeout và giới hạn bộ nhớ khi cào dữ liệu nặng
 set_time_limit(0);
@@ -28,6 +22,14 @@ $batch_size = 5;
 
 if (empty($target_url)) {
     echo json_encode(["status" => "error", "message" => "Vui lòng dán đường link An Phát PC cần cào dữ liệu!"]);
+    exit();
+}
+
+// CHỐNG SSRF: chỉ cho phép cào từ đúng domain An Phát PC, không cho server
+// tự fetch URL tùy ý (nội bộ, localhost, cloud metadata...) do client gửi lên.
+if (!is_allowed_crawl_host($target_url)) {
+    http_response_code(400);
+    echo json_encode(["status" => "error", "message" => "Chỉ hỗ trợ cào dữ liệu từ anphatpc.com.vn."]);
     exit();
 }
 
