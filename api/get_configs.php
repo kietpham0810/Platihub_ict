@@ -1,20 +1,19 @@
 <?php
+header("Access-Control-Allow-Origin: *");
+header("Content-Type: application/json; charset=UTF-8");
+
 // Bắt buộc nhúng lõi kết nối
 require_once '../config/database.php';
 
 // Khởi tạo kết nối
 $database = new Database();
 $db = $database->getConnection();
-
-// Viết truy vấn lấy dữ liệu
-$query = "SELECT meta_key, meta_value FROM configs";
-$stmt = $db->prepare($query);
-$stmt->execute();
-
-$configs = array();
+$collection = $db->configs;
 
 // Đổ dữ liệu vào mảng
-while ($row = $stmt->fetch(PDO::FETCH_ASSOC)) {
+$configs = array();
+$cursor = $collection->find();
+foreach ($cursor as $row) {
     $configs[$row['meta_key']] = $row['meta_value'];
 }
 

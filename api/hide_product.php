@@ -12,20 +12,28 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/mongo_helpers.php';
 
 try {
     $database = new Database();
     $db = $database->getConnection();
+    $collection = $db->products;
 
     $data = json_decode(file_get_contents("php://input"));
 
     if (!empty($data->id)) {
-        // Chuyển trạng thái từ approved về lại pending
-        $query = "UPDATE products SET status = 'pending' WHERE id = :id";
-        $stmt = $db->prepare($query);
-        $stmt->bindParam(':id', $data->id);
+        $objectId = to_object_id($data->id);
 
-        if ($stmt->execute()) {
+        if ($objectId === null) {
+            http_response_code(400);
+            echo json_encode(["status" => "error", "message" => "Dữ liệu không hợp lệ. Thiếu ID sản phẩm."]);
+            exit();
+        }
+
+        // Chuyển trạng thái từ approved về lại pending
+        $result = $collection->updateOne(['_id' => $objectId], ['$set' => ['status' => 'pending']]);
+
+        if ($result->isAcknowledged()) {
             http_response_code(200);
             echo json_encode(["status" => "success", "message" => "Đã ẩn sản phẩm khỏi trang chủ."]);
         } else {

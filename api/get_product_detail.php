@@ -10,25 +10,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 }
 
 require_once '../config/database.php';
+require_once '../config/mongo_helpers.php';
 
 try {
     $database = new Database();
     $db = $database->getConnection();
+    $collection = $db->products;
 
     $id = isset($_GET['id']) ? $_GET['id'] : die(json_encode(["status" => "error", "message" => "Thiếu ID sản phẩm."]));
 
-    // Chỉ lấy sản phẩm nếu nó đang được phép hiển thị (approved)
-    $query = "SELECT * FROM products WHERE id = :id AND status = 'approved' LIMIT 1";
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(':id', $id);
-    $stmt->execute();
+    $objectId = to_object_id($id);
+    if ($objectId === null) {
+        http_response_code(404);
+        echo json_encode(["status" => "error", "message" => "Sản phẩm không tồn tại hoặc đã bị ẩn."]);
+        exit();
+    }
 
-    if ($stmt->rowCount() > 0) {
-        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    // Chỉ lấy sản phẩm nếu nó đang được phép hiển thị (approved)
+    $doc = $collection->findOne(['_id' => $objectId, 'status' => 'approved']);
+
+    if ($doc) {
         http_response_code(200);
         echo json_encode([
             "status" => "success",
-            "data" => $row
+            "data" => product_doc_to_array($doc)
         ]);
     } else {
         http_response_code(404);

@@ -9,6 +9,7 @@ require_once '../config/database.php';
 
 $database = new Database();
 $db = $database->getConnection();
+$collection = $db->products;
 
 $data = json_decode(file_get_contents("php://input"));
 
@@ -25,31 +26,32 @@ if (
     !empty($data->image_url) &&
     !empty($data->product_type)
 ) {
-    // Thêm cột specifications vào Query
-    $query = "INSERT INTO products (product_name, image_url, description, manufacturer, product_type, status, source, specifications) 
-              VALUES (:name, :image, :desc, :manufacturer, :type, 'approved', 'manual', :specs)";
-              
-    $stmt = $db->prepare($query);
-
     // Xử lý dữ liệu sạch
     $desc = !empty($data->description) ? htmlspecialchars(strip_tags($data->description)) : "";
     $manufacturer = !empty($data->manufacturer) ? $data->manufacturer : "";
-    
+
     // XỬ LÝ SPECIFICATIONS: Chuyển Object thành chuỗi JSON (Giữ nguyên Unicode tiếng Việt)
     $specs_json = NULL;
     if (isset($data->specifications) && is_object($data->specifications)) {
         $specs_json = json_encode($data->specifications, JSON_UNESCAPED_UNICODE);
     }
 
-    $stmt->bindParam(":name", $data->product_name);
-    $stmt->bindParam(":image", $data->image_url);
-    $stmt->bindParam(":desc", $desc);
-    $stmt->bindParam(":manufacturer", $manufacturer);
-    $stmt->bindParam(":type", $data->product_type);
-    $stmt->bindParam(":specs", $specs_json);
-
     try {
-        if ($stmt->execute()) {
+        $result = $collection->insertOne([
+            'product_name' => $data->product_name,
+            'image_url' => $data->image_url,
+            'description' => $desc,
+            'manufacturer' => $manufacturer,
+            'product_type' => $data->product_type,
+            'price' => null,
+            'is_price_visible' => 0,
+            'specifications' => $specs_json,
+            'status' => 'approved',
+            'source' => 'manual',
+            'created_at' => new MongoDB\BSON\UTCDateTime(),
+        ]);
+
+        if ($result->getInsertedCount() === 1) {
             http_response_code(201); // 201 Created
             echo json_encode([
                 "status" => "success",

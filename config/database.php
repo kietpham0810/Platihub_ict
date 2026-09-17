@@ -1,34 +1,42 @@
 <?php
 // config/database.php
+require_once __DIR__ . '/../vendor/autoload.php';
+
+// Nạp thông tin kết nối MongoDB local (không commit lên git). Trên môi
+// trường hosting thật, các biến MONGO_URI / MONGO_DB_NAME nên được set thẳng
+// làm biến môi trường của server thay vì dùng file này.
+$envLocalFile = __DIR__ . '/env.local.php';
+if (file_exists($envLocalFile)) {
+    require_once $envLocalFile;
+}
+
+use MongoDB\Client;
+use MongoDB\Database as MongoDatabase;
+
 class Database {
-    private $host;
+    private $uri;
     private $db_name;
-    private $username;
-    private $password;
     public $conn;
 
     public function __construct() {
-        // Bọc lót 3 tầng để đảm bảo Docker/Apache bắt được biến môi trường trên mây
-        $this->host = $_SERVER['DB_HOST'] ?? $_ENV['DB_HOST'] ?? getenv('DB_HOST') ?: "localhost";
-        $this->db_name = $_SERVER['DB_NAME'] ?? $_ENV['DB_NAME'] ?? getenv('DB_NAME') ?: "platihub_db";
-        $this->username = $_SERVER['DB_USER'] ?? $_ENV['DB_USER'] ?? getenv('DB_USER') ?: "root";
-        $this->password = $_SERVER['DB_PASS'] ?? $_ENV['DB_PASS'] ?? getenv('DB_PASS') ?: "";
+        $this->uri = $_SERVER['MONGO_URI'] ?? $_ENV['MONGO_URI'] ?? getenv('MONGO_URI') ?: "mongodb://localhost:27017";
+        $this->db_name = $_SERVER['MONGO_DB_NAME'] ?? $_ENV['MONGO_DB_NAME'] ?? getenv('MONGO_DB_NAME') ?: "platihub_db";
     }
 
-    public function getConnection() {
-        $this->conn = null;
+    /**
+     * Trả về MongoDB\Database đã kết nối tới cluster.
+     */
+    public function getConnection(): MongoDatabase {
         try {
-            // Nếu phát hiện đang ở localhost thì gọi mặc định, còn có DB_HOST thật thì ép kết nối qua TCP/IP
-            $dsn = "mysql:host=" . $this->host . ";dbname=" . $this->db_name . ";charset=utf8mb4";
-            
-            $this->conn = new PDO($dsn, $this->username, $this->password);
-            $this->conn->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
-        } catch(PDOException $exception) {
+            $client = new Client($this->uri);
+            // Ping để phát hiện lỗi kết nối ngay, tránh lỗi mù mờ ở query sau.
+            $client->selectDatabase('admin')->command(['ping' => 1]);
+            $this->conn = $client->selectDatabase($this->db_name);
+        } catch (\Throwable $exception) {
             http_response_code(500);
             echo json_encode([
-                "status" => "error", 
-                "message" => "Lỗi kết nối Cơ sở dữ liệu Cloud.",
-                "host_debug" => $this->host, // In luôn cái Host ra xem nó đang bắt được gì để dễ debug
+                "status" => "error",
+                "message" => "Lỗi kết nối Cơ sở dữ liệu MongoDB.",
                 "error_detail" => $exception->getMessage()
             ]);
             exit();

@@ -1,0 +1,53 @@
+services:
+  db:
+    image: mysql:8.0
+    container_name: platihub_db
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: platihub_db
+      MYSQL_USER: platihub
+      MYSQL_PASSWORD: platihub
+    ports:
+      - "3307:3306" # tránh đụng MySQL cài sẵn (XAMPP...) đang chiếm 3306
+    volumes:
+      - platihub_db_data:/var/lib/mysql
+      - ./schema.sql:/docker-entrypoint-initdb.d/schema.sql:ro
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-proot"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build: .
+    container_name: platihub_api
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DB_HOST: db
+      DB_NAME: platihub_db
+      DB_USER: platihub
+      DB_PASS: platihub
+    ports:
+      - "8080:80"
+    volumes:
+      - .:/var/www/html # mount code để sửa PHP không cần build lại image
+
+  phpmyadmin:
+    image: phpmyadmin/phpmyadmin:latest
+    container_name: platihub_phpmyadmin
+    restart: unless-stopped
+    depends_on:
+      - db
+    environment:
+      PMA_HOST: db
+      PMA_USER: root
+      PMA_PASSWORD: root
+    ports:
+      - "8081:80"
+
+volumes:
+  platihub_db_data:

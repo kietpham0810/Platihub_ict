@@ -13,25 +13,40 @@ if ($_SERVER['REQUEST_METHOD'] === 'OPTIONS') {
 
 // BƯỚC 3: LOGIC XÓA SẢN PHẨM
 require_once '../config/database.php';
+require_once '../config/mongo_helpers.php';
 
 $database = new Database();
 $db = $database->getConnection();
+$collection = $db->products;
 
 // Lấy dữ liệu từ body request (JSON)
 $data = json_decode(file_get_contents("php://input"));
 
 if (!empty($data->id)) {
-    $query = "DELETE FROM products WHERE id = :id";
-    $stmt = $db->prepare($query);
-    $stmt->bindParam(":id", $data->id);
+    $objectId = to_object_id($data->id);
 
-    if ($stmt->execute()) {
-        http_response_code(200);
+    if ($objectId === null) {
+        http_response_code(400);
         echo json_encode([
-            "status" => "success",
-            "message" => "Sản phẩm đã được xóa khỏi hệ thống."
+            "status" => "error",
+            "message" => "ID sản phẩm không hợp lệ."
         ]);
-    } else {
+        exit();
+    }
+
+    try {
+        $result = $collection->deleteOne(['_id' => $objectId]);
+
+        if ($result->isAcknowledged()) {
+            http_response_code(200);
+            echo json_encode([
+                "status" => "success",
+                "message" => "Sản phẩm đã được xóa khỏi hệ thống."
+            ]);
+        } else {
+            throw new Exception("Delete failed.");
+        }
+    } catch (Exception $e) {
         http_response_code(500);
         echo json_encode([
             "status" => "error",
