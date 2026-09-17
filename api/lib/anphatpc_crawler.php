@@ -713,6 +713,199 @@ function runAutoCrawlAllCategories($db, ?callable $logFn = null, $maxNewPerRun =
 }
 
 /**
+ * Cào theo BỘ LỌC: quét 1 link danh mục, chỉ lưu những sản phẩm khớp điều kiện
+ * (giá, chip, RAM), bỏ qua sản phẩm quảng cáo/khuyến mãi và sản phẩm không
+ * khớp, dừng khi đủ $wantCount sản phẩm mới hoặc quét hết $scanCap sản phẩm.
+ * Dùng cho api/crawl_filtered.php (nút "Cào theo bộ lọc" ở trang admin).
+ */
+function crawlAnPhatFiltered($db, $target_url, array $filters, $wantCount, $scanCap, ?callable $logFn = null) {
+    $log = $logFn ?: function ($msg) {};
+    $collection = $db->products;
+    $default_image = "https://via.placeholder.com/400x300?text=An+Phat+PC";
+
+    $priceMin = isset($filters['price_min']) && $filters['price_min'] !== null ? (int) $filters['price_min'] : null;
+    $priceMax = isset($filters['price_max']) && $filters['price_max'] !== null ? (int) $filters['price_max'] : null;
+    $chip = !empty($filters['chip']) ? removeVietnameseTones($filters['chip']) : null;
+    $ram = !empty($filters['ram']) ? removeVietnameseTones($filters['ram']) : null;
+
+    $html = fetchHTML($target_url);
+    if (!$html) {
+        return ["status" => "error", "message" => "Không thể truy cập đường link danh mục này. Web có thể đang chặn Bot."];
+    }
+
+    $dom = new DOMDocument();
+    @$dom->loadHTML(mb_convert_encoding($html, 'HTML-ENTITIES', 'UTF-8'));
+    $xpath = new DOMXPath($dom);
+
+    $isCategoryPage = $xpath->query("//*[contains(@onclick, 'show_more_product')] | //div[@id='js-filter-container'] | //div[contains(@class, 'p-item')] | //div[contains(@class, 'product-item')]")->length > 0;
+    if (!$isCategoryPage) {
+        return ["status" => "error", "message" => "Link này không phải trang danh mục (danh sách sản phẩm)."];
+    }
+
+    $totalLinks = 0;
+    $apiImageMap = [];
+    $links = fetchAnPhatCategoryProductLinks($target_url, $html, 0, $scanCap, $totalLinks, $apiImageMap);
+
+    if (empty($links)) {
+        return ["status" => "error", "message" => "Không tìm thấy sản phẩm nào trong danh mục này."];
+    }
+
+    $insertedCount = 0;
+    $updatedCount = 0;
+    $scannedCount = 0;
+    $excludedCount = 0;
+    $filteredOutCount = 0;
+
+    // Từ khóa loại trừ: quảng cáo / khuyến mãi / hàng tặng kèm, không phải sản
+    // phẩm thật cần cào.
+    $excludeKeywords = ['an phat', 'khuyen mai', 'giam gia', 'sale', 'qua tang', 'combo'];
+
+    foreach ($links as $link) {
+        if ($insertedCount >= $wantCount) {
+            break;
+        }
+        if ($scannedCount >= $scanCap) {
+            break;
+        }
+        $scannedCount++;
+
+        usleep(300000); // Ngủ 0.3s để tránh bị block IP
+
+        $detail_html = fetchHTML($link);
+        if (!$detail_html) {
+            continue;
+        }
+
+        $detail_dom = new DOMDocument();
+        @$detail_dom->loadHTML(mb_convert_encoding($detail_html, 'HTML-ENTITIES', 'UTF-8'));
+        $detail_xpath = new DOMXPath($detail_dom);
+
+        $nameNode = $detail_xpath->query("//div[@class='pro-name']/h1");
+        if ($nameNode->length === 0) {
+            $nameNode = $detail_xpath->query("//h1");
+        }
+        if ($nameNode->length === 0) {
+            continue;
+        }
+        $product_name = trim($nameNode->item(0)->nodeValue);
+
+        $nameKey = ' ' . removeVietnameseTones($product_name) . ' ';
+        $isExcluded = false;
+        foreach ($excludeKeywords as $keyword) {
+            if (strpos($nameKey, $keyword) !== false) {
+                $isExcluded = true;
+                break;
+            }
+        }
+        if ($isExcluded) {
+            $excludedCount++;
+            $log("  [bỏ qua - quảng cáo/KM] {$product_name}");
+            continue;
+        }
+
+        $priceNode = $detail_xpath->query("//div[contains(@class, 'price-container')]/p[@class='price'] | //div[contains(@class, 'product-price-meta')]//span[contains(@class, 'price')]");
+        $price_val = 0;
+        if ($priceNode->length > 0) {
+            $price_val = (int) preg_replace('/[^0-9]/', '', $priceNode->item(0)->nodeValue);
+        }
+        if ($price_val == 0) {
+            $price_val = null;
+        }
+
+        if ($priceMin !== null && ($price_val === null || $price_val < $priceMin)) {
+            $filteredOutCount++;
+            continue;
+        }
+        if ($priceMax !== null && ($price_val === null || $price_val > $priceMax)) {
+            $filteredOutCount++;
+            continue;
+        }
+
+        $specs = parseProductSpecifications($detail_xpath);
+        $specs_json = !empty($specs) ? json_encode($specs, JSON_UNESCAPED_UNICODE) : null;
+        $matchKey = removeVietnameseTones($product_name . ' ' . ($specs_json ?? ''));
+
+        if ($chip !== null && strpos($matchKey, $chip) === false) {
+            $filteredOutCount++;
+            continue;
+        }
+        if ($ram !== null && strpos($matchKey, $ram) === false) {
+            $filteredOutCount++;
+            continue;
+        }
+
+        $source_image = '';
+        $found_image = findProductImageUrl($detail_xpath, $link);
+        if (!empty($found_image)) {
+            $source_image = normalizeImageUrl($found_image);
+        } elseif (!empty($apiImageMap[$link])) {
+            $source_image = normalizeImageUrl($apiImageMap[$link]);
+        }
+
+        $product_type = classifyAnPhatProductType($product_name, $target_url);
+
+        $existing_product = $collection->findOne(
+            ['product_name' => $product_name],
+            ['projection' => ['_id' => 1, 'source' => 1, 'image_url' => 1]]
+        );
+
+        if ($existing_product) {
+            $image_update = '';
+            $existing_image = $existing_product['image_url'] ?? '';
+            if (!empty($source_image) && stripos($existing_image, 'imgur.com') === false) {
+                $image_update = buildCleanImageUrl($source_image);
+            }
+            $set_fields = [
+                'specifications' => $specs_json,
+                'price' => $price_val,
+                'product_type' => $product_type,
+            ];
+            if ($image_update !== '') {
+                $set_fields['image_url'] = $image_update;
+            }
+            $collection->updateOne(['_id' => $existing_product['_id']], ['$set' => $set_fields]);
+            $updatedCount++;
+            $log("  [cập nhật] {$product_name}");
+        } else {
+            $image_url = $default_image;
+            if (!empty($source_image)) {
+                $clean_image = buildCleanImageUrl($source_image);
+                $image_url = $clean_image !== '' ? $clean_image : $source_image;
+            }
+            $collection->insertOne([
+                'product_name' => $product_name,
+                'price' => $price_val,
+                'is_price_visible' => 1,
+                'image_url' => $image_url,
+                'description' => '',
+                'manufacturer' => '',
+                'product_type' => $product_type,
+                'status' => 'pending',
+                'source' => 'bot',
+                'specifications' => $specs_json,
+                'created_at' => new MongoDB\BSON\UTCDateTime(),
+            ]);
+            $insertedCount++;
+            $log("  [+ mới] {$product_name}");
+        }
+    }
+
+    return [
+        "status" => "success",
+        "message" => "Hoàn tất cào theo bộ lọc.",
+        "data" => [
+            "scanned" => $scannedCount,
+            "new_inserted" => $insertedCount,
+            "updated_specifications" => $updatedCount,
+            "excluded" => $excludedCount,
+            "filtered_out" => $filteredOutCount,
+            "total_links_in_category" => $totalLinks,
+            "reached_target" => $insertedCount >= $wantCount,
+        ],
+    ];
+}
+
+/**
  * Cào 1 batch sản phẩm từ 1 link An Phát PC (danh mục hoặc sản phẩm đơn lẻ) và
  * ghi thẳng vào MongoDB (status='pending' cho sản phẩm mới, giữ nguyên logic
  * chống trùng lặp/không đè dữ liệu admin đã sửa tay như bản gốc).
